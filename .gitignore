@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+
+# Volumes / données locales éventuellement montées en bind
+postgres-data/

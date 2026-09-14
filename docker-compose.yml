@@ -1,0 +1,79 @@
+name: sunu-boutik
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sunu-boutik-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - sunu-boutik-network
+
+  api:
+    build:
+      context: ../sunu-boutik-api
+      dockerfile: Dockerfile
+    image: sunu-boutik-api:local
+    container_name: sunu-boutik-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Construite depuis les identifiants du service `db` : une seule
+      # source de vérité pour les identifiants Postgres (POSTGRES_*).
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      SECRET_KEY: ${SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      BREVO_API_KEY: ${BREVO_API_KEY}
+      BREVO_SENDER_EMAIL: ${BREVO_SENDER_EMAIL}
+      BREVO_SENDER_NAME: ${BREVO_SENDER_NAME}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      FRONTEND_URL: ${FRONTEND_URL}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - api_uploads:/app/uploads
+    networks:
+      - sunu-boutik-network
+
+  web:
+    build:
+      context: ../sunu-boutik-web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    image: sunu-boutik-web:local
+    container_name: sunu-boutik-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    networks:
+      - sunu-boutik-network
+
+volumes:
+  postgres_data:
+    name: sunu-boutik-postgres-data
+  api_uploads:
+    name: sunu-boutik-api-uploads
+
+networks:
+  sunu-boutik-network:
+    name: sunu-boutik-network
+    driver: bridge
