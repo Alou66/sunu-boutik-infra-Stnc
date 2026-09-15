@@ -34,7 +34,7 @@ services:
     # publié pour permettre la connexion depuis un client SQL sur la machine.
 
   api:
-    image: ghcr.io/alou66/sunu-boutik-api:latest
+    image: ghcr.io/alou66/sunu-boutik-api-stnc:latest
     container_name: sunu-boutik-api
     restart: unless-stopped
     depends_on:
@@ -61,7 +61,7 @@ services:
       - sunu-boutik-network
 
   web:
-    image: ghcr.io/alou66/sunu-boutik-web:latest
+    image: ghcr.io/alou66/sunu-boutik-web-stnc:latest
     container_name: sunu-boutik-web
     restart: unless-stopped
     depends_on:
