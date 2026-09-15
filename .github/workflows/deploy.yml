@@ -1,0 +1,48 @@
+name: Deploy Infra
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-infra-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync repo, reload Nginx and recreate services on the server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ~/sunu-boutik-infra
+            git fetch origin main
+            git reset --hard origin/main
+            sudo cp deploy/nginx.conf /etc/nginx/sites-available/sunu-boutik
+            sudo nginx -t
+            sudo systemctl reload nginx
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --wait
+            docker image prune -f
+
+      - name: Verify the site is reachable through the public endpoint
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS -o /dev/null "http://$EC2_HOST/" && curl -fsS "http://$EC2_HOST/api/health"; then
+              echo
+              echo "OK"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Health check failed after deploy" >&2
+          exit 1

@@ -109,6 +109,46 @@ Deux volumes Docker nommés sont créés :
 
 Ils survivent à `docker compose down` ; seul `docker compose down -v` les supprime.
 
+## Déploiement continu (CI/CD)
+
+Chaque repo (`sunu-boutik-api`, `sunu-boutik-web`, `sunu-boutik-infra`) a son
+propre workflow GitHub Actions (`.github/workflows/deploy.yml`), déclenché à
+chaque push sur `main` :
+
+- **api / web** : build de l'image Docker, push sur GitHub Container Registry
+  (`ghcr.io/alou66/sunu-boutik-api` / `-web`), puis connexion SSH au serveur
+  pour `docker compose -f docker-compose.prod.yml pull` + `up -d --wait` du
+  seul service concerné (migrations Alembic appliquées automatiquement après
+  le redémarrage de `api`), et enfin un health-check public pour valider le
+  déploiement.
+- **infra** : `git pull` sur le serveur, redéploiement de la config Nginx
+  (`deploy/nginx.conf`), et `docker compose -f docker-compose.prod.yml up -d --wait`
+  pour appliquer tout changement du compose de prod.
+
+`docker-compose.prod.yml` (utilisé uniquement sur le serveur) référence des
+images déjà construites par la CI (`image:`) — contrairement à
+`docker-compose.yml` (dev local, `build:`) — pour éviter de compiler sur
+l'instance EC2 à faibles ressources.
+
+Secrets GitHub Actions à configurer dans **chacun des 3 repos** (Settings →
+Secrets and variables → Actions → *Secrets*) :
+
+| Secret | Valeur |
+|---|---|
+| `EC2_HOST` | IP publique du serveur (ex. `51.20.138.11`) |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | Contenu de la clé privée `.pem` |
+
+Et dans `sunu-boutik-web` uniquement (onglet *Variables*, pas *Secrets* — la
+valeur est publique, inlinée dans le bundle JS) :
+
+| Variable | Valeur |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | `http://51.20.138.11/api` |
+
+`GITHUB_TOKEN` (push/pull vers GHCR) est fourni automatiquement par Actions,
+aucune configuration nécessaire.
+
 ## Développement vs production
 
 Cette stack est pensée pour un environnement type "démo / soutenance" (une
