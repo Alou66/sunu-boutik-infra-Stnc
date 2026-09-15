@@ -7,7 +7,11 @@ on:
 
 concurrency:
   group: deploy-infra-prod
-  cancel-in-progress: false
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   deploy:
@@ -15,14 +19,19 @@ jobs:
     steps:
       - name: Sync repo, reload Nginx and recreate services on the server
         uses: appleboy/ssh-action@v1.2.5
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER
           script: |
             exec 200>/tmp/sunu-boutik-deploy.lock
             flock -w 300 200
             set -e
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             cd ~/sunu-boutik-infra
             git fetch origin main
             git reset --hard origin/main
