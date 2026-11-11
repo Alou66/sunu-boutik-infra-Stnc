@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sauvegarde PostgreSQL {{ postgres_db }} vers S3 (pg_dump chiffré age)
+Documentation=file:///usr/local/sbin/sunu-boutik-pg-backup
+Wants=network-online.target
+After=network-online.target {{ postgresql_backup_pg_service }}
+RequiresMountsFor={{ postgresql_backup_work_dir }}
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/sbin/sunu-boutik-pg-backup
+SyslogIdentifier=sunu-boutik-pg-backup
+UMask=0077
+TimeoutStartSec=2h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Durcissement compatible avec l'AWS CLI en snap (snap-confine est setuid :
+# pas de NoNewPrivileges ; le HOME de postgres doit rester accessible en
+# écriture pour ~/snap).
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true

@@ -1,3 +1,6 @@
+# OBSOLÈTE — ancien déploiement sur une seule EC2, conservé pour référence.
+# Ne pas utiliser en production : voir legacy/README.md et ansible/DEPLOYMENT.md.
+
 name: sunu-boutik
 
 # Compose de production : utilisé sur le serveur EC2, déployé automatiquement

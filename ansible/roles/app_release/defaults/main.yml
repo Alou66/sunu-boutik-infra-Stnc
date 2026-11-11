@@ -1,0 +1,26 @@
+---
+# Rôle interne : déploie UN conteneur applicatif depuis une image GHCR
+# taguée par SHA de commit. Appelé par les rôles fastapi et web
+# (import_role), qui fournissent les variables ci-dessous.
+
+# Obligatoires
+app_release_name: ""        # nom du conteneur, ex. sunu-boutik-api
+app_release_repo: ""        # ex. ghcr.io/alou66/sunu-boutik-api-stnc
+app_release_tag: ""         # ex. sha-<40 caractères hexadécimaux>
+app_release_ports: []       # ex. ["127.0.0.1:3000:3000"]
+app_release_health_url: ""  # URL testée depuis l'hôte après démarrage
+
+# Optionnelles
+app_release_env_file: ""
+# Force la recréation (ex. fichier d'environnement modifié : Docker ne
+# compare pas le contenu d'un env_file).
+app_release_force_recreate: false
+app_release_health_retries: 20
+app_release_health_delay: 3
+
+# Nettoyage : on conserve au minimum les N images les plus récentes du dépôt,
+# plus toujours l'image courante et la précédente (rollback). Jamais de
+# `docker image prune -a`.
+app_release_keep_images: 3
+
+app_release_log_dir: /opt/sunu-boutik/releases

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Sauvegarde quotidienne de la base PostgreSQL Sunu Boutik vers S3.
+#
+#   pg_dump (format custom, compressé) → contrôle pg_restore --list
+#   → chiffrement age (clé publique) → PUT S3 conditionnel (If-None-Match)
+#   → contrôle du checksum SHA-256 côté S3.
+#
+# Exécuté par sunu-boutik-pg-backup.timer en tant qu'utilisateur postgres.
+# Le jour PGBACKUP_WEEKLY_DAY (1 = lundi … 7 = dimanche, UTC), la sauvegarde
+# est aussi déposée sous weekly/. La rétention (7 quotidiennes, 4
+# hebdomadaires) est appliquée par les règles de cycle de vie du bucket :
+# ce script n'a jamais le droit de supprimer un objet.
+#
+# Voir docs/BACKUP_RESTORE.md pour l'exploitation et les codes de sortie.
+set -Eeuo pipefail
+umask 077
+
+# shellcheck source=pg-backup-common.sh
+source "${PGBACKUP_LIB:-/usr/local/lib/sunu-boutik/pg-backup-common.sh}"
+
+# Limite d'un PUT S3 unique (5 Gio). Au-delà, une évolution vers l'envoi
+# multipart est nécessaire (voir la documentation).
+readonly MAX_SINGLE_PUT=$((5 * 1024 * 1024 * 1024))
+
+usage() {
+  cat <<'EOF'
+Usage : sunu-boutik-pg-backup [--help]
+Sauvegarde la base configurée dans /etc/sunu-boutik/pg-backup.conf vers S3.
+EOF
+}
+
+case ${1:-} in
+  -h | --help) usage; exit 0 ;;
+  "") ;;
+  *) usage >&2; exit "$EXIT_CONFIG" ;;
+esac
+
+load_config
+validate_common
+PGBACKUP_WEEKLY_DAY=${PGBACKUP_WEEKLY_DAY:-7}
+PGBACKUP_AGE_RECIPIENT=${PGBACKUP_AGE_RECIPIENT:-}
+[[ $PGBACKUP_WEEKLY_DAY =~ ^[1-7]$ ]] || die "$EXIT_CONFIG" "PGBACKUP_WEEKLY_DAY doit valoir 1 à 7"
+[[ $PGBACKUP_AGE_RECIPIENT =~ ^age1[02-9ac-hj-np-z]{58}$ ]] ||
+  die "$EXIT_CONFIG" "PGBACKUP_AGE_RECIPIENT absent ou invalide (clé publique age1…)"
+
+require_commands pg_dump pg_restore pg_isready psql age sha256sum openssl base64 jq flock df "$PGBACKUP_AWS_BIN"
+prepare_work_dir
+acquire_lock
+
+# Horodatage UTC de la sauvegarde (surchargeable pour les tests uniquement).
+TS=${PGBACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
+[[ $TS =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "$EXIT_CONFIG" "PGBACKUP_TIMESTAMP invalide"
+STARTED=$SECONDS
+
+TMP=$(mktemp -d "$PGBACKUP_WORK_DIR/backup.XXXXXX")
+trap 'rm -rf -- "$TMP"' EXIT
+S3_ERR="$TMP/aws.err"
+DUMP="$TMP/${PGBACKUP_DB}_${TS}.dump"
+ENC="$DUMP.age"
+
+info "début sauvegarde base=$PGBACKUP_DB horodatage=$TS bucket=$PGBACKUP_BUCKET"
+
+# 1. Base joignable et existante
+if ! pg_isready -q -p "$PGBACKUP_PORT" -t 10; then
+  die "$EXIT_DB_UNAVAILABLE" "PostgreSQL indisponible sur le port $PGBACKUP_PORT"
+fi
+if ! DB_SIZE=$(psql_value "$PGBACKUP_DB" "SELECT pg_database_size(current_database())" 2>"$TMP/psql.err"); then
+  log_tool_error psql "$TMP/psql.err"
+  die "$EXIT_DB_UNAVAILABLE" "base $PGBACKUP_DB inaccessible"
+fi
+PG_SERVER_VERSION=$(psql_value "$PGBACKUP_DB" "SHOW server_version" 2>/dev/null | cut -d' ' -f1)
+
+# 2. Espace disque : le dump compressé et sa version chiffrée tiennent
+#    largement dans la taille brute de la base.
+AVAIL=$(df -P -B1 -- "$PGBACKUP_WORK_DIR" | awk 'NR == 2 { print $4 }')
+if ((AVAIL < DB_SIZE)); then
+  die "$EXIT_LOCAL" "espace insuffisant dans $PGBACKUP_WORK_DIR (libre=$AVAIL o, base=$DB_SIZE o)"
+fi
+
+# 3. Dump (format custom : compressé, contrôlable, restauration sélective)
+if ! pg_dump --format=custom --compress=6 --no-password \
+  --port="$PGBACKUP_PORT" --dbname="$PGBACKUP_DB" --file="$DUMP" 2>"$TMP/pg_dump.err"; then
+  log_tool_error pg_dump "$TMP/pg_dump.err"
+  die "$EXIT_DUMP" "échec de pg_dump"
+fi
+
+# 4. Intégrité : l'archive doit être lisible par pg_restore
+if ! TOC_ENTRIES=$(pg_restore --list -- "$DUMP" 2>"$TMP/pg_restore.err" | grep -cv '^;'); then
+  log_tool_error pg_restore "$TMP/pg_restore.err"
+  die "$EXIT_INTEGRITY" "archive pg_dump illisible par pg_restore"
+fi
+((TOC_ENTRIES > 0)) || die "$EXIT_INTEGRITY" "archive pg_dump vide"
+PLAIN_SHA=$(sha256_hex "$DUMP")
+PLAIN_SIZE=$(file_size "$DUMP")
+
+# 5. Chiffrement (clé publique : la clé privée n'est jamais sur ce serveur)
+if ! age --encrypt --recipient "$PGBACKUP_AGE_RECIPIENT" --output "$ENC" -- "$DUMP" 2>"$TMP/age.err"; then
+  log_tool_error age "$TMP/age.err"
+  die "$EXIT_CRYPTO" "échec du chiffrement age"
+fi
+rm -f -- "$DUMP"
+ENC_SHA=$(sha256_hex "$ENC")
+ENC_SHA_B64=$(sha256_b64 "$ENC")
+ENC_SIZE=$(file_size "$ENC")
+((ENC_SIZE <= MAX_SINGLE_PUT)) ||
+  die "$EXIT_LOCAL" "sauvegarde de $ENC_SIZE o : au-delà de la limite d'un PUT S3 unique"
+
+# 6. Envoi conditionnel : If-None-Match refuse d'écraser un objet existant ;
+#    S3 vérifie le SHA-256 fourni et rejette un fichier altéré en transit.
+upload() {
+  local key=$1 out
+  out=$(s3api put-object \
+    --bucket "$PGBACKUP_BUCKET" --key "$key" --body "$ENC" \
+    --if-none-match '*' \
+    --checksum-sha256 "$ENC_SHA_B64" \
+    --server-side-encryption AES256 \
+    --content-type application/octet-stream \
+    --metadata "db=$PGBACKUP_DB,created=$TS,format=pgdump-custom-age,pg-version=$PG_SERVER_VERSION,plain-sha256=$PLAIN_SHA,enc-sha256=$ENC_SHA") ||
+    s3_fail "$EXIT_S3" "envoi de $key"
+
+  # 7. Contrôle après envoi : taille et checksum enregistrés par S3
+  out=$(s3api head-object --bucket "$PGBACKUP_BUCKET" --key "$key" --checksum-mode ENABLED) ||
+    s3_fail "$EXIT_S3_VERIFY" "contrôle de $key"
+  local remote_size remote_sha
+  remote_size=$(jq -r '.ContentLength // empty' <<<"$out")
+  remote_sha=$(jq -r '.ChecksumSHA256 // empty' <<<"$out")
+  [[ $remote_size == "$ENC_SIZE" && $remote_sha == "$ENC_SHA_B64" ]] ||
+    die "$EXIT_S3_VERIFY" "contrôle de $key : taille ou checksum S3 différent du fichier envoyé"
+  info "envoyé et vérifié : s3://$PGBACKUP_BUCKET/$key ($ENC_SIZE o)"
+}
+
+upload "$(backup_key daily "$TS")"
+if [[ $(date -u +%u) == "$PGBACKUP_WEEKLY_DAY" ]]; then
+  upload "$(backup_key weekly "$TS")"
+fi
+
+info "sauvegarde OK base=$PGBACKUP_DB horodatage=$TS entrées=$TOC_ENTRIES" \
+  "dump=$PLAIN_SIZE o chiffré=$ENC_SIZE o sha256=$ENC_SHA durée=$((SECONDS - STARTED)) s"

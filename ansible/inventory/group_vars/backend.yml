@@ -1,0 +1,3 @@
+---
+# Variables backend - SECRETS DANS ANSIBLE VAULT
+app_env: production

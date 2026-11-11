@@ -1,0 +1,7 @@
+---
+fastapi_app_dir: /opt/sunu-boutik
+fastapi_port: 8000
+# Publié sur l'IP privée uniquement (pas 0.0.0.0) : Docker contourne ufw,
+# on ne compte donc pas que sur le Security Group pour fermer les autres
+# interfaces.
+fastapi_bind_ip: "{{ backend_private_ip }}"

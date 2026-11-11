@@ -1,0 +1,8 @@
+---
+# Variables frontend
+
+# Email de compte Let's Encrypt (avis d'expiration du certificat).
+# OBLIGATOIRE pour la première émission du certificat : adresse réelle de
+# l'exploitant, à renseigner avant le premier déploiement (le rôle nginx
+# refuse une valeur vide ou d'exemple).
+nginx_certbot_email: ""

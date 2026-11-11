@@ -1,0 +1,17 @@
+---
+# Frontend : uniquement le conteneur Next.js, joignable par le Nginx local.
+#
+# NEXT_PUBLIC_API_URL est inliné dans le bundle JS au BUILD de l'image (CI du
+# repo web) : aucune variable d'environnement passée ici ne peut le changer.
+# L'image est construite avec NEXT_PUBLIC_API_URL=/api (chemin relatif,
+# même origine), Nginx proxifiant /api/ vers l'IP privée du backend.
+- name: Déploiement conteneur web Next.js
+  ansible.builtin.import_role:
+    name: app_release
+  vars:
+    app_release_name: sunu-boutik-web
+    app_release_repo: "{{ web_image_repo }}"
+    app_release_tag: "{{ web_image_tag }}"
+    app_release_ports:
+      - "127.0.0.1:{{ web_port }}:3000"
+    app_release_health_url: "http://127.0.0.1:{{ web_port }}/"

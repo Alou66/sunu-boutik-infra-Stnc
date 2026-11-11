@@ -1,0 +1,13 @@
+aws_region   = "eu-north-1"
+project_name = "sunu-boutik"
+
+# Vide = sunu-boutik-tfstate-<ID compte>. Ne JAMAIS réutiliser le bucket
+# des sauvegardes PostgreSQL (sunu-boutik-pg-backups-*).
+# state_bucket_name = ""
+
+# Doit correspondre à `key` dans environments/prod/versions.tf
+state_keys = ["sunu-boutik/prod/terraform.tfstate"]
+
+# noncurrent_retention_days = 90
+# noncurrent_versions_kept  = 50
+create_iam_policies = true

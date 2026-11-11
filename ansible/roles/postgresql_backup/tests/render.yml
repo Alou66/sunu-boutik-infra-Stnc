@@ -1,0 +1,23 @@
+---
+# Rendu des templates du rôle avec des valeurs fictives (appelé par run.sh).
+- name: Rendu des templates postgresql_backup pour le banc de tests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    postgres_db: sunuboutik
+    postgres_port: 5432
+    test_role_dir: "{{ playbook_dir | dirname }}"
+  tasks:
+    - name: Valeurs par défaut du rôle
+      ansible.builtin.include_vars: "{{ test_role_dir }}/defaults/main.yml"
+
+    - name: Rendu des templates
+      ansible.builtin.template:
+        src: "{{ test_role_dir }}/templates/{{ item }}.j2"
+        dest: "{{ test_work_dir }}/rendered/{{ item }}"
+        mode: "0644"
+      loop:
+        - pg-backup.conf
+        - sunu-boutik-pg-backup.service
+        - sunu-boutik-pg-backup.timer

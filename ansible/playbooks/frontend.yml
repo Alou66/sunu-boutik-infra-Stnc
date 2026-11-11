@@ -1,0 +1,14 @@
+---
+# Serveur web : seul hôte qui exécute le conteneur Next.js, derrière Nginx.
+- name: Frontend - Next.js et Nginx
+  hosts: frontend
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker
+      tags: [docker]
+    - role: web
+      tags: [web, deploy]
+    - role: nginx
+      tags: [nginx]

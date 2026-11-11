@@ -1,0 +1,19 @@
+# Généré par scripts/generate_inventory.sh depuis les outputs Terraform.
+# Seul le frontend a une IP publique ; backend et database sont privés.
+
+# Mode ssm (défaut) : ansible_host = ID d'instance, SSH encapsulé dans SSM
+[frontend]
+# sunu-boutik-frontend ansible_host=i-xxxxxxxxxxxxxxxxx ansible_ssh_common_args='-o ProxyCommand="aws ssm start-session --region eu-north-1 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"'
+
+[backend]
+# sunu-boutik-backend ansible_host=i-xxxxxxxxxxxxxxxxx ansible_ssh_common_args='...'
+
+[database]
+# sunu-boutik-database ansible_host=i-xxxxxxxxxxxxxxxxx ansible_ssh_common_args='...'
+
+# Mode bastion : frontend par son IP publique, backend/database par IP privée
+# sunu-boutik-backend ansible_host=10.20.11.x ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/your-key.pem -W %h:%p -q ubuntu@FRONTEND_PUBLIC_IP"'
+
+[all:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=~/.ssh/your-key.pem

@@ -1,0 +1,123 @@
+#!/usr/bin/python3 -I
+"""Faux AWS CLI (s3api) pour les tests : stockage local, aucun réseau.
+
+FAKE_S3_ROOT  : répertoire racine (un sous-répertoire par bucket)
+FAKE_S3_DENY  : put|get|head|list|all -> AccessDenied (403)
+FAKE_S3_NOCREDS=1 -> "Unable to locate credentials"
+FAKE_S3_LOG   : journal des appels (opération, bucket, clé)
+"""
+import base64, hashlib, json, os, sys, datetime
+
+ROOT = os.environ["FAKE_S3_ROOT"]
+# Identifiants factices volontairement présents dans les messages d'erreur,
+# pour vérifier que les scripts les masquent.
+FAKE_CRED = "Credential=AKIAFAKEFAKEFAKE1234/20261105/eu-north-1/s3/aws4_request, Signature=deadbeefcafe0123456789"
+
+
+def err(msg, code=254):
+    sys.stderr.write("\n" + msg + "\n")
+    sys.exit(code)
+
+
+def parse(argv):
+    opts, pos, i = {}, [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--"):
+            if a in ("--no-cli-pager",):
+                i += 1
+                continue
+            opts[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            pos.append(a)
+            i += 1
+    return opts, pos
+
+
+def paths(bucket, key):
+    base = os.path.join(ROOT, bucket)
+    if not os.path.isdir(base):
+        err(f"An error occurred (NoSuchBucket) when calling the operation: The specified bucket does not exist")
+    return os.path.join(base, "objects", key), os.path.join(base, "meta", key + ".json")
+
+
+def b64sha(data):
+    return base64.b64encode(hashlib.sha256(data).digest()).decode()
+
+
+def main():
+    opts, pos = parse(sys.argv[1:])
+    if pos[:1] != ["s3api"] or len(pos) < 2:
+        err("fake aws: seul s3api est simulé", 252)
+    op = pos[1]
+    if os.environ.get("FAKE_S3_NOCREDS") == "1":
+        err("Unable to locate credentials. You can configure credentials by running \"aws configure\".", 253)
+    deny = os.environ.get("FAKE_S3_DENY", "")
+    short = {"put-object": "put", "get-object": "get", "head-object": "head", "list-objects-v2": "list"}.get(op)
+    log = os.environ.get("FAKE_S3_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"op": op, "bucket": opts.get("bucket"), "key": opts.get("key"),
+                                "prefix": opts.get("prefix"), "if-none-match": opts.get("if-none-match")}) + "\n")
+    if short and deny in (short, "all"):
+        name = {"put": "PutObject", "get": "GetObject", "head": "HeadObject", "list": "ListObjectsV2"}[short]
+        err(f"An error occurred (AccessDenied) when calling the {name} operation: User is not authorized ({FAKE_CRED})")
+
+    bucket = opts.get("bucket")
+    if op == "put-object":
+        obj, meta = paths(bucket, opts["key"])
+        # Politique de bucket DenyOverwrite : If-None-Match obligatoire
+        if opts.get("if-none-match") != "*":
+            err("An error occurred (AccessDenied) when calling the PutObject operation: explicit deny (DenyOverwrite)")
+        if os.path.exists(obj):
+            err("An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold")
+        data = open(opts["body"], "rb").read()
+        given = opts.get("checksum-sha256")
+        if given and given != b64sha(data):
+            err("An error occurred (BadDigest) when calling the PutObject operation: The SHA256 you specified did not match the calculated checksum.")
+        md = dict(kv.split("=", 1) for kv in opts.get("metadata", "").split(",") if kv)
+        os.makedirs(os.path.dirname(obj), exist_ok=True)
+        os.makedirs(os.path.dirname(meta), exist_ok=True)
+        open(obj, "wb").write(data)
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        json.dump({"Metadata": md, "ChecksumSHA256": b64sha(data), "LastModified": now,
+                   "ServerSideEncryption": opts.get("server-side-encryption")}, open(meta, "w"))
+        print(json.dumps({"ETag": '"%s"' % hashlib.md5(data).hexdigest(), "ChecksumSHA256": b64sha(data)}))
+    elif op in ("head-object", "get-object"):
+        obj, meta = paths(bucket, opts["key"])
+        if not os.path.exists(obj):
+            name = "HeadObject" if op == "head-object" else "GetObject"
+            code = "404" if op == "head-object" else "NoSuchKey"
+            err(f"An error occurred ({code}) when calling the {name} operation: Not Found")
+        data = open(obj, "rb").read()
+        m = json.load(open(meta))
+        out = {"ContentLength": len(data), "Metadata": m["Metadata"], "LastModified": m["LastModified"],
+               "ServerSideEncryption": m.get("ServerSideEncryption")}
+        if opts.get("checksum-mode") == "ENABLED":
+            out["ChecksumSHA256"] = m["ChecksumSHA256"]
+        if op == "get-object":
+            # Comme l'AWS CLI : validation du checksum au téléchargement
+            if opts.get("checksum-mode") == "ENABLED" and b64sha(data) != m["ChecksumSHA256"]:
+                err(f"Expected checksum {m['ChecksumSHA256']} did not match calculated checksum: {b64sha(data)}", 255)
+            open(pos[2], "wb").write(data)
+        print(json.dumps(out))
+    elif op == "list-objects-v2":
+        base = os.path.join(ROOT, bucket)
+        if not os.path.isdir(base):
+            err("An error occurred (NoSuchBucket) when calling the ListObjectsV2 operation: The specified bucket does not exist")
+        prefix, contents = opts.get("prefix", ""), []
+        objroot = os.path.join(base, "objects")
+        for d, _, files in os.walk(objroot):
+            for fn in files:
+                key = os.path.relpath(os.path.join(d, fn), objroot)
+                if key.startswith(prefix):
+                    m = json.load(open(os.path.join(base, "meta", key + ".json")))
+                    contents.append({"Key": key, "Size": os.path.getsize(os.path.join(d, fn)),
+                                     "LastModified": m["LastModified"]})
+        print(json.dumps({"Contents": sorted(contents, key=lambda c: c["Key"])} if contents else {"Prefix": prefix}))
+    else:
+        err(f"fake aws: opération non simulée {op}", 252)
+
+
+main()

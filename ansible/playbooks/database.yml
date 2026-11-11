@@ -1,0 +1,15 @@
+---
+# Serveur PostgreSQL : ni Docker ni conteneur applicatif.
+- name: Database - PostgreSQL 16
+  hosts: database
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: postgresql
+      tags: [postgresql]
+    # Sauvegarde quotidienne vers S3, activée par postgresql_backup_enabled
+    # une fois le bucket créé (Terraform backup_enabled = true).
+    - role: postgresql_backup
+      tags: [backup]
+      when: postgresql_backup_enabled | bool

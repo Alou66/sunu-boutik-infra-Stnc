@@ -1,0 +1,5 @@
+# Copier en backend.s3.tfbackend (non versionné) ou générer depuis bootstrap :
+#   terraform -chdir=../../bootstrap output -raw backend_config > backend.s3.tfbackend
+# Seul le nom du bucket est attendu ici. Ne JAMAIS y mettre access_key,
+# secret_key ou token : les identifiants viennent de AWS_PROFILE / SSO.
+bucket = "sunu-boutik-tfstate-111122223333"

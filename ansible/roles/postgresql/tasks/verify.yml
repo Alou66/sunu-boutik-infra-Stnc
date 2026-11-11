@@ -1,0 +1,75 @@
+---
+- name: Contrôle des vérifications post-démarrage
+  when: not ansible_check_mode
+  block:
+    - name: Lecture de start.conf
+      ansible.builtin.slurp:
+        src: "{{ postgresql_conf_dir }}/start.conf"
+      register: postgresql_start_conf
+
+    - name: Démarrage automatique du cluster au boot (start.conf = auto)
+      ansible.builtin.assert:
+        that:
+          - "'auto' in (postgresql_start_conf.content | b64decode).splitlines() | map('trim')"
+        fail_msg: "start.conf n'est pas à 'auto' : le cluster ne démarrerait pas au boot."
+        quiet: true
+
+    - name: État des services systemd
+      ansible.builtin.service_facts:
+
+    - name: Service PostgreSQL activé au boot
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['services']['postgresql.service']['status'] == 'enabled'
+        fail_msg: "postgresql.service n'est pas activé au démarrage."
+        quiet: true
+
+    - name: État du cluster
+      ansible.builtin.command: pg_lsclusters --no-header {{ postgresql_version }} {{ postgresql_cluster }}
+      register: postgresql_lsclusters
+      changed_when: false
+
+    - name: Le cluster doit être en ligne sur le volume EBS
+      ansible.builtin.assert:
+        that:
+          - postgresql_lsclusters.stdout.split()[3] == 'online'
+          - postgresql_lsclusters.stdout.split()[5] == postgresql_data_directory
+        fail_msg: "Cluster inattendu : {{ postgresql_lsclusters.stdout }}"
+        quiet: true
+
+    - name: Connexion de l'utilisateur applicatif (TCP local, mot de passe)
+      community.postgresql.postgresql_ping:
+        db: "{{ postgres_db }}"
+        login_host: 127.0.0.1
+        login_user: "{{ db_user }}"
+        login_password: "{{ db_password }}"
+        login_port: "{{ postgres_port }}"
+      register: postgresql_ping
+      failed_when: not postgresql_ping.is_available
+      no_log: true
+
+# Test réel de redémarrage, uniquement sur demande explicite.
+- name: Test de redémarrage du serveur
+  when: postgresql_verify_reboot | bool and not ansible_check_mode
+  block:
+    - name: Redémarrage du serveur database
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+
+    - name: Attente de PostgreSQL après redémarrage
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ postgres_port }}"
+        timeout: 120
+
+    - name: État du cluster après redémarrage
+      ansible.builtin.command: pg_lsclusters --no-header {{ postgresql_version }} {{ postgresql_cluster }}
+      register: postgresql_lsclusters_reboot
+      changed_when: false
+
+    - name: Volume et cluster opérationnels après redémarrage
+      ansible.builtin.assert:
+        that:
+          - postgresql_lsclusters_reboot.stdout.split()[3] == 'online'
+          - postgresql_lsclusters_reboot.stdout.split()[5] == postgresql_data_directory
+        quiet: true

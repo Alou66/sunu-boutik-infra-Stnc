@@ -1,0 +1,69 @@
+---
+# Préconditions du déploiement API : aucune modification sur l'hôte.
+- name: Vérification des adresses privées
+  ansible.builtin.assert:
+    that:
+      - fastapi_bind_ip is match('^(\d{1,3}\.){3}\d{1,3}$')
+      - database_private_ip is match('^(\d{1,3}\.){3}\d{1,3}$')
+      - frontend_private_ip is match('^(\d{1,3}\.){3}\d{1,3}$')
+    fail_msg: >-
+      backend_private_ip, database_private_ip et frontend_private_ip doivent
+      être renseignées (inventory/group_vars/all/vars.yml).
+    quiet: true
+
+# Seuls les noms des variables apparaissent dans le résultat d'un assert,
+# jamais leurs valeurs : aucun secret n'est journalisé.
+- name: Vérification des secrets du vault
+  ansible.builtin.assert:
+    that:
+      - db_user | default('') | length > 0
+      - db_password | default('') | length > 0
+      - secret_key | default('') | length >= 32
+      - admin_password | default('') | length > 0
+      - not (db_user | default('')) is search('CHANGE_ME')
+      - not (db_password | default('')) is search('CHANGE_ME')
+      - not (secret_key | default('')) is search('CHANGE_ME')
+      - not (admin_password | default('')) is search('CHANGE_ME')
+    fail_msg: >-
+      db_user, db_password, secret_key (32 caractères minimum) et
+      admin_password doivent être renseignés dans
+      inventory/group_vars/all/vault.yml (ansible-vault edit), sans valeur
+      CHANGE_ME.
+    quiet: true
+
+- name: Vérification de la configuration de l'API
+  ansible.builtin.assert:
+    that:
+      - admin_email | default('') is match('^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$')
+      - not (admin_email | default('')) is search('@example\.(com|org|net)$')
+      - frontend_url | default('') is match('^https?://[^\s/]+(/\S*)?$')
+      - not (frontend_url | default('')) is search('/$')
+    fail_msg: >-
+      admin_email (adresse réelle, pas example.com) et frontend_url (URL
+      http(s) sans « / » final) doivent être définis dans
+      inventory/group_vars/all/vars.yml.
+    quiet: true
+
+# SMTP facultatif : smtp_user vide désactive l'envoi sans bloquer le
+# déploiement. Renseigné, il doit être une adresse valide accompagnée de
+# smtp_password (vault).
+- name: Vérification de la configuration SMTP
+  ansible.builtin.assert:
+    that:
+      - >-
+        (smtp_user | default('') | length == 0) or
+        (smtp_user is match('^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$') and
+        smtp_password | default('') | length > 0)
+    fail_msg: >-
+      smtp_user est renseigné : il doit être une adresse email valide et
+      smtp_password doit être défini dans le vault. Laisser smtp_user vide
+      pour désactiver l'envoi d'emails.
+    quiet: true
+
+- name: Avertissement SMTP désactivé
+  ansible.builtin.debug:
+    msg: >-
+      smtp_user est vide : l'API démarre sans envoi d'emails (inscriptions,
+      validations de boutique). Renseigner smtp_user dans vars.yml pour
+      l'activer.
+  when: smtp_user | default('') | length == 0

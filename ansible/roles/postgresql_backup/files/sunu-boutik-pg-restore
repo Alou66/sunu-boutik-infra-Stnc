@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# Exploitation des sauvegardes PostgreSQL Sunu Boutik : liste, fraîcheur,
+# vérification d'intégrité et restauration dans une base ISOLÉE.
+#
+# Ce script ne restaure JAMAIS dans la base de production : la cible doit
+# être une nouvelle base nommée restore_*, inexistante. La bascule éventuelle
+# vers la production est une procédure manuelle (docs/BACKUP_RESTORE.md),
+# qui fait perdre toutes les écritures postérieures à la sauvegarde.
+#
+# À lancer en tant que postgres : sudo -u postgres sunu-boutik-pg-restore …
+set -Eeuo pipefail
+umask 077
+
+# shellcheck source=pg-backup-common.sh
+source "${PGBACKUP_LIB:-/usr/local/lib/sunu-boutik/pg-backup-common.sh}"
+
+usage() {
+  cat <<'EOF'
+Usage :
+  sunu-boutik-pg-restore list   [daily|weekly]
+  sunu-boutik-pg-restore status
+  sunu-boutik-pg-restore verify  SOURCE --identity FICHIER
+  sunu-boutik-pg-restore restore SOURCE --identity FICHIER --target-db restore_NOM [--keep-owner]
+
+SOURCE :
+  --key CLE_S3               clé complète (voir « list »)
+  --latest daily|weekly      sauvegarde la plus récente
+  --file CHEMIN [--sha256 H] fichier .dump.age local (H : SHA-256 attendu)
+
+--identity   clé privée age (AGE-SECRET-KEY-…), mode 0600 ou 0400, jamais
+             conservée sur le serveur (voir la documentation).
+--target-db  nouvelle base, nom restore_[a-z0-9_]+, qui ne doit pas exister.
+--keep-owner conserve les propriétaires d'origine (rôles existants requis) ;
+             par défaut les objets appartiennent à l'utilisateur courant.
+EOF
+}
+
+CMD=${1:-}
+[[ -n $CMD ]] || { usage >&2; exit "$EXIT_CONFIG"; }
+shift
+case $CMD in
+  -h | --help) usage; exit 0 ;;
+  list | status | verify | restore) ;;
+  *) usage >&2; exit "$EXIT_CONFIG" ;;
+esac
+
+KIND=daily SRC_KEY="" SRC_LATEST="" SRC_FILE="" SRC_SHA="" IDENTITY="" TARGET_DB="" KEEP_OWNER=false
+while (($# > 0)); do
+  case $1 in
+    daily | weekly) [[ $CMD == list ]] || { usage >&2; exit "$EXIT_CONFIG"; }; KIND=$1 ;;
+    --key) SRC_KEY=${2:?--key requiert une valeur}; shift ;;
+    --latest) SRC_LATEST=${2:?--latest requiert daily ou weekly}; shift ;;
+    --file) SRC_FILE=${2:?--file requiert un chemin}; shift ;;
+    --sha256) SRC_SHA=${2:?--sha256 requiert une valeur}; shift ;;
+    --identity) IDENTITY=${2:?--identity requiert un fichier}; shift ;;
+    --target-db) TARGET_DB=${2:?--target-db requiert un nom}; shift ;;
+    --keep-owner) KEEP_OWNER=true ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; die "$EXIT_CONFIG" "option inconnue : $1" ;;
+  esac
+  shift
+done
+
+load_config
+validate_common
+PGBACKUP_MAX_AGE_HOURS=${PGBACKUP_MAX_AGE_HOURS:-26}
+[[ $PGBACKUP_MAX_AGE_HOURS =~ ^[0-9]+$ ]] || die "$EXIT_CONFIG" "PGBACKUP_MAX_AGE_HOURS invalide"
+
+require_commands jq sha256sum openssl
+[[ $CMD == list || $CMD == status || -z $SRC_FILE ]] && require_commands "$PGBACKUP_AWS_BIN"
+[[ $CMD == verify || $CMD == restore ]] && require_commands age pg_restore psql createdb dropdb pg_isready flock
+prepare_work_dir
+
+TMP=$(mktemp -d "$PGBACKUP_WORK_DIR/restore.XXXXXX")
+trap 'rm -rf -- "$TMP"' EXIT
+S3_ERR="$TMP/aws.err"
+
+# Clés de sauvegarde valides du type demandé, triées (horodatage dans le nom).
+list_keys() {
+  local kind=$1 out
+  out=$(s3api list-objects-v2 --bucket "$PGBACKUP_BUCKET" --prefix "$PGBACKUP_PREFIX/$kind/") ||
+    s3_fail "$EXIT_S3" "liste des sauvegardes $kind"
+  jq -r '.Contents[]? | .Key' <<<"$out" | grep -E "$(backup_key_regex)" | sort || true
+}
+
+key_timestamp() { [[ $1 =~ _([0-9]{8})T([0-9]{2})([0-9]{2})([0-9]{2})Z\.dump\.age$ ]] && printf '%s %s:%s:%s UTC' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; }
+
+cmd_list() {
+  local out
+  out=$(s3api list-objects-v2 --bucket "$PGBACKUP_BUCKET" --prefix "$PGBACKUP_PREFIX/$KIND/") ||
+    s3_fail "$EXIT_S3" "liste des sauvegardes $KIND"
+  local lines
+  lines=$(jq -r '.Contents[]? | "\(.Key)\t\(.Size)\t\(.LastModified)"' <<<"$out" |
+    grep -E "$(backup_key_regex | sed 's/\$$//')"$'\t' | sort || true)
+  [[ -n $lines ]] || die "$EXIT_NOT_FOUND" "aucune sauvegarde $KIND sous s3://$PGBACKUP_BUCKET/$PGBACKUP_PREFIX/$KIND/"
+  printf 'CLE\tTAILLE_OCTETS\tDATE_S3\n%s\n' "$lines"
+}
+
+cmd_status() {
+  local latest ts epoch age_h rc=0 kind
+  for kind in daily weekly; do
+    latest=$(list_keys "$kind" | tail -n 1)
+    if [[ -z $latest ]]; then
+      warn "aucune sauvegarde $kind"
+      rc=$EXIT_STALE
+      continue
+    fi
+    ts=$(key_timestamp "$latest")
+    epoch=$(date -u -d "$ts" +%s)
+    age_h=$((($(date -u +%s) - epoch) / 3600))
+    info "dernière sauvegarde $kind : $latest (il y a ${age_h} h)"
+    if [[ $kind == daily ]] && ((age_h > PGBACKUP_MAX_AGE_HOURS)); then
+      error "dernière sauvegarde quotidienne trop ancienne (${age_h} h > ${PGBACKUP_MAX_AGE_HOURS} h)"
+      rc=$EXIT_STALE
+    fi
+  done
+  return "$rc"
+}
+
+check_identity() {
+  [[ -n $IDENTITY ]] || die "$EXIT_CONFIG" "--identity est obligatoire"
+  [[ -f $IDENTITY && -r $IDENTITY ]] || die "$EXIT_CONFIG" "fichier d'identité age illisible"
+  if [[ -n $(find "$IDENTITY" -maxdepth 0 -perm /077) ]]; then
+    die "$EXIT_CONFIG" "fichier d'identité age accessible au groupe ou aux autres : chmod 600 requis"
+  fi
+}
+
+# Récupère la sauvegarde dans $ENC et vérifie son SHA-256 ; renseigne
+# EXPECTED_PLAIN_SHA si les métadonnées S3 le fournissent.
+EXPECTED_PLAIN_SHA="" SOURCE_LABEL=""
+fetch_backup() {
+  local sources=0 key out expected_enc actual
+  [[ -n $SRC_KEY ]] && sources=$((sources + 1))
+  [[ -n $SRC_LATEST ]] && sources=$((sources + 1))
+  [[ -n $SRC_FILE ]] && sources=$((sources + 1))
+  ((sources == 1)) || die "$EXIT_CONFIG" "indiquer exactement une source : --key, --latest ou --file"
+  ENC="$TMP/backup.dump.age"
+
+  if [[ -n $SRC_FILE ]]; then
+    [[ -f $SRC_FILE && -r $SRC_FILE ]] || die "$EXIT_NOT_FOUND" "fichier de sauvegarde introuvable : $SRC_FILE"
+    cp -- "$SRC_FILE" "$ENC"
+    SOURCE_LABEL=$SRC_FILE
+    if [[ -n $SRC_SHA ]]; then
+      actual=$(sha256_hex "$ENC")
+      [[ $actual == "${SRC_SHA,,}" ]] || die "$EXIT_INTEGRITY" "fichier corrompu : SHA-256 différent de la valeur attendue"
+      info "SHA-256 du fichier local conforme"
+    else
+      warn "aucun --sha256 fourni : intégrité contrôlée par age et pg_restore uniquement"
+    fi
+    return 0
+  fi
+
+  if [[ -n $SRC_LATEST ]]; then
+    [[ $SRC_LATEST == daily || $SRC_LATEST == weekly ]] || die "$EXIT_CONFIG" "--latest attend daily ou weekly"
+    key=$(list_keys "$SRC_LATEST" | tail -n 1)
+    [[ -n $key ]] || die "$EXIT_NOT_FOUND" "aucune sauvegarde $SRC_LATEST disponible"
+  else
+    key=$SRC_KEY
+    [[ $key =~ $(backup_key_regex) ]] || die "$EXIT_CONFIG" "clé hors du préfixe de sauvegarde attendu : $key"
+  fi
+  SOURCE_LABEL="s3://$PGBACKUP_BUCKET/$key"
+  info "téléchargement de $SOURCE_LABEL"
+  # --checksum-mode ENABLED : l'AWS CLI valide le checksum S3 au téléchargement.
+  out=$(s3api get-object --bucket "$PGBACKUP_BUCKET" --key "$key" --checksum-mode ENABLED "$ENC") ||
+    s3_fail "$EXIT_S3" "téléchargement de $key"
+
+  expected_enc=$(jq -r '.Metadata["enc-sha256"] // empty' <<<"$out")
+  EXPECTED_PLAIN_SHA=$(jq -r '.Metadata["plain-sha256"] // empty' <<<"$out")
+  [[ -n $expected_enc ]] || die "$EXIT_INTEGRITY" "métadonnée enc-sha256 absente : objet non produit par sunu-boutik-pg-backup"
+  actual=$(sha256_hex "$ENC")
+  [[ $actual == "$expected_enc" ]] || die "$EXIT_INTEGRITY" "fichier corrompu : SHA-256 différent de celui enregistré à la sauvegarde"
+  info "SHA-256 de la sauvegarde chiffrée conforme"
+}
+
+# Déchiffre et contrôle l'archive ; résultat dans $DUMP.
+decrypt_and_check() {
+  DUMP="$TMP/backup.dump"
+  if ! age --decrypt --identity "$IDENTITY" --output "$DUMP" -- "$ENC" 2>"$TMP/age.err"; then
+    log_tool_error age "$TMP/age.err"
+    die "$EXIT_CRYPTO" "déchiffrement impossible : clé age incorrecte ou fichier corrompu"
+  fi
+  rm -f -- "$ENC"
+  if [[ -n $EXPECTED_PLAIN_SHA && $(sha256_hex "$DUMP") != "$EXPECTED_PLAIN_SHA" ]]; then
+    die "$EXIT_INTEGRITY" "archive déchiffrée différente de l'archive d'origine (plain-sha256)"
+  fi
+  local entries
+  if ! entries=$(pg_restore --list -- "$DUMP" 2>"$TMP/pg_restore.err" | grep -cv '^;'); then
+    log_tool_error pg_restore "$TMP/pg_restore.err"
+    die "$EXIT_INTEGRITY" "archive illisible par pg_restore (fichier corrompu)"
+  fi
+  ((entries > 0)) || die "$EXIT_INTEGRITY" "archive vide"
+  info "archive lisible par pg_restore ($entries entrées)"
+}
+
+cmd_verify() {
+  check_identity
+  acquire_lock
+  fetch_backup
+  decrypt_and_check
+  info "vérification OK : $SOURCE_LABEL"
+}
+
+cmd_restore() {
+  check_identity
+  [[ $TARGET_DB =~ ^restore_[a-z0-9_]{1,55}$ ]] ||
+    die "$EXIT_TARGET" "--target-db doit être un nom restore_[a-z0-9_]+ (la base de production n'est jamais une cible)"
+  [[ $TARGET_DB != "$PGBACKUP_DB" ]] || die "$EXIT_TARGET" "la base de production ne peut pas être une cible"
+
+  pg_isready -q -p "$PGBACKUP_PORT" -t 10 ||
+    die "$EXIT_DB_UNAVAILABLE" "PostgreSQL indisponible sur le port $PGBACKUP_PORT"
+  local exists
+  exists=$(psql_value postgres "SELECT 1 FROM pg_database WHERE datname = '$TARGET_DB'" 2>"$TMP/psql.err") || {
+    log_tool_error psql "$TMP/psql.err"
+    die "$EXIT_DB_UNAVAILABLE" "connexion à PostgreSQL impossible"
+  }
+  [[ -z $exists ]] || die "$EXIT_TARGET" "la base $TARGET_DB existe déjà : aucun écrasement (choisir un autre nom)"
+
+  acquire_lock
+  fetch_backup
+  decrypt_and_check
+
+  createdb --no-password -p "$PGBACKUP_PORT" --template=template0 --encoding=UTF8 -- "$TARGET_DB" 2>"$TMP/createdb.err" || {
+    log_tool_error createdb "$TMP/createdb.err"
+    die "$EXIT_TARGET" "création de la base $TARGET_DB impossible"
+  }
+  local owner_opts=(--no-owner --no-privileges)
+  [[ $KEEP_OWNER == true ]] && owner_opts=()
+  # Transaction unique : en cas d'erreur, la base cible reste vide et est
+  # supprimée (c'est ce script qui vient de la créer).
+  if ! pg_restore --no-password -p "$PGBACKUP_PORT" --dbname="$TARGET_DB" \
+    --exit-on-error --single-transaction "${owner_opts[@]}" -- "$DUMP" 2>"$TMP/pg_restore.err"; then
+    log_tool_error pg_restore "$TMP/pg_restore.err"
+    dropdb --no-password -p "$PGBACKUP_PORT" -- "$TARGET_DB" 2>/dev/null || true
+    die "$EXIT_INTEGRITY" "échec de la restauration : base $TARGET_DB supprimée, production intacte"
+  fi
+  local tables
+  tables=$(psql_value "$TARGET_DB" "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')")
+  info "restauration OK : $SOURCE_LABEL → base isolée $TARGET_DB ($tables tables et vues)"
+  warn "la production ($PGBACKUP_DB) n'a pas été modifiée. Une bascule vers cette sauvegarde" \
+    "ferait perdre toutes les écritures postérieures à sa date (voir docs/BACKUP_RESTORE.md)."
+}
+
+case $CMD in
+  list) cmd_list ;;
+  status) cmd_status ;;
+  verify) cmd_verify ;;
+  restore) cmd_restore ;;
+esac

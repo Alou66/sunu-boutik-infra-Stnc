@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Configuration de sunu-boutik-pg-backup / sunu-boutik-pg-restore.
+# AUCUN SECRET : PostgreSQL par socket local (peer), AWS par le rôle IAM de
+# l'instance, chiffrement par la clé PUBLIQUE age ci-dessous.
+PGBACKUP_DB={{ postgres_db }}
+PGBACKUP_PORT={{ postgres_port }}
+PGBACKUP_BUCKET={{ postgresql_backup_bucket }}
+PGBACKUP_PREFIX={{ postgresql_backup_prefix }}
+PGBACKUP_REGION={{ postgresql_backup_region }}
+PGBACKUP_AGE_RECIPIENT={{ postgresql_backup_age_recipient }}
+PGBACKUP_WEEKLY_DAY={{ postgresql_backup_weekly_day }}
+PGBACKUP_MAX_AGE_HOURS={{ postgresql_backup_max_age_hours }}
+PGBACKUP_WORK_DIR={{ postgresql_backup_work_dir }}
+PGBACKUP_AWS_BIN={{ postgresql_backup_aws_bin }}
+PGBACKUP_PG_BIN_DIR=/usr/lib/postgresql/{{ postgresql_backup_version }}/bin

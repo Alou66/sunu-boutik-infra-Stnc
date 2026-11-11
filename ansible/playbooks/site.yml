@@ -1,0 +1,11 @@
+---
+# Point d'entrée complet : chaque tier a son propre playbook, limité à son
+# groupe d'hôtes. Ordre : la base avant l'API, l'API avant le frontend.
+- name: Import database
+  ansible.builtin.import_playbook: database.yml
+
+- name: Import backend
+  ansible.builtin.import_playbook: backend.yml
+
+- name: Import frontend
+  ansible.builtin.import_playbook: frontend.yml

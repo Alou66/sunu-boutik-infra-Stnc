@@ -1,0 +1,78 @@
+---
+# Rend et active le site. Inclus deux fois par main.yml : avant l'émission
+# du certificat (HTTP seul) puis après (HTTPS), le mode étant choisi selon
+# la présence réelle des fichiers du certificat sur l'hôte.
+- name: Présence du certificat Let's Encrypt
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ nginx_ssl_certificate }}"
+    - "{{ nginx_ssl_certificate_key }}"
+  register: nginx_cert_files
+
+- name: Choix du mode HTTP seul / HTTPS
+  ansible.builtin.set_fact:
+    nginx_https_enabled: "{{ nginx_cert_files.results | map(attribute='stat.exists') | min }}"
+
+- name: Rendu et validation du site
+  block:
+    - name: Rendu configuration Nginx depuis template
+      ansible.builtin.template:
+        src: sunu-boutik.conf.j2
+        dest: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: nginx_site_render
+      notify: reload nginx
+
+    - name: Activation site
+      ansible.builtin.file:
+        src: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ nginx_site_name }}"
+        state: link
+      notify: reload nginx
+
+    # Motif écrit sans accolades consécutives pour ne pas être lui-même
+    # interprété par Jinja.
+    - name: Aucune expression Jinja non rendue dans la config
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -nE
+          - "[{][{]|[{]%"
+          - "/etc/nginx/sites-available/{{ nginx_site_name }}"
+      register: nginx_unrendered
+      changed_when: false
+      failed_when: nginx_unrendered.rc != 1
+
+    - name: Test configuration Nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+  rescue:
+    - name: Restauration de la configuration précédente
+      ansible.builtin.copy:
+        src: "{{ nginx_site_render.backup_file }}"
+        dest: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+        remote_src: true
+        mode: "0644"
+      when: nginx_site_render.backup_file is defined
+
+    - name: Retrait du site invalide (aucune version précédente)
+      ansible.builtin.file:
+        path: "/etc/nginx/sites-enabled/{{ nginx_site_name }}"
+        state: absent
+      when: nginx_site_render.backup_file is not defined
+
+    - name: Échec de validation Nginx
+      ansible.builtin.fail:
+        msg: >-
+          La configuration Nginx générée est invalide ; la version précédente
+          a été restaurée et Nginx n'a pas été rechargé.
+
+# Recharge maintenant (et non en fin de play) : certbot a besoin que le
+# serveur HTTP serve déjà /.well-known/acme-challenge/.
+- name: Application immédiate de la configuration
+  ansible.builtin.meta: flush_handlers

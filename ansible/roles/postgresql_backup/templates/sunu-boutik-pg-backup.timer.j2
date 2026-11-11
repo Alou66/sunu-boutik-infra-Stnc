@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sauvegarde quotidienne PostgreSQL {{ postgres_db }}
+
+[Timer]
+OnCalendar={{ postgresql_backup_on_calendar }}
+# Rattrape une exécution manquée (instance arrêtée à l'heure prévue).
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

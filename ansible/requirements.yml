@@ -1,0 +1,16 @@
+---
+# Collections utilisées par les rôles et playbooks, versions épinglées.
+# Installation (répertoire utilisateur, jamais les répertoires système) :
+#   ansible-galaxy collection install -r ansible/requirements.yml
+collections:
+  - name: ansible.posix
+    version: "2.1.0"
+  - name: community.docker
+    version: "5.0.4"
+  - name: community.general
+    version: "12.1.0"
+  - name: community.postgresql
+    version: "4.2.0"
+  # Dépendance de community.docker, épinglée pour une résolution reproductible.
+  - name: community.library_inventory_filtering_v1
+    version: "1.1.5"

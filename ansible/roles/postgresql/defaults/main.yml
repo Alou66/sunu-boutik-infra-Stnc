@@ -1,0 +1,25 @@
+---
+postgresql_version: "16"
+postgresql_cluster: main
+
+# Nom demandé à AWS lors de l'attachement. Sur les instances Nitro (t3...),
+# le disque apparaît en NVMe (/dev/nvme1n1...) : renseigner alors
+# postgresql_data_volume_id pour le retrouver via /dev/disk/by-id.
+postgresql_data_device: /dev/xvdf
+# ID du volume EBS (ex. vol-0123456789abcdef0), sortie Terraform.
+postgresql_data_volume_id: ""
+postgresql_data_fstype: ext4
+postgresql_data_mount: /data/postgres
+
+# Sous-répertoire du point de montage : la racine d'un ext4 contient
+# lost+found, qu'initdb refuse.
+postgresql_data_directory: "{{ postgresql_data_mount }}/{{ postgresql_version }}/{{ postgresql_cluster }}"
+postgresql_conf_dir: "/etc/postgresql/{{ postgresql_version }}/{{ postgresql_cluster }}"
+postgresql_service: "postgresql@{{ postgresql_version }}-{{ postgresql_cluster }}"
+
+# Adresse privée du serveur database (fait Ansible) et seul client distant.
+postgresql_listen_address: "{{ ansible_facts['default_ipv4']['address'] }}"
+postgresql_allowed_client: "{{ backend_private_ip }}"
+
+# Test de redémarrage réel (désactivé par défaut) : -e postgresql_verify_reboot=true
+postgresql_verify_reboot: false

@@ -1,0 +1,37 @@
+---
+# Domaine principal (nom du certificat Let's Encrypt) et alias servis.
+nginx_server_name: sunu-boutique.online
+nginx_server_aliases:
+  - www.sunu-boutique.online
+
+# Next.js tourne sur le même hôte (conteneur publié sur 127.0.0.1:3000,
+# voir rôle web).
+nginx_frontend_upstream: "127.0.0.1:3000"
+
+# FastAPI tourne sur l'hôte backend, joignable uniquement via le réseau
+# privé du VPC (Security Group backend : port 8000 depuis le SG frontend).
+nginx_backend_host: "{{ backend_private_ip }}"
+nginx_backend_port: 8000
+
+# Limites de requêtes. L'API ne reçoit que du JSON (aucun upload de
+# fichier) : 10m laisse une large marge.
+nginx_client_max_body_size: 10m
+# Limitation de débit par IP cliente sur /api/ (en plus de slowapi côté API).
+nginx_api_rate: 20r/s
+nginx_api_burst: 40
+nginx_proxy_connect_timeout: 5s
+nginx_proxy_read_timeout: 60s
+nginx_proxy_send_timeout: 60s
+
+# Let's Encrypt (méthode webroot, aucun plugin certbot-nginx).
+nginx_certbot_enabled: true
+# Obligatoire pour la première émission du certificat (avis d'expiration).
+nginx_certbot_email: ""
+# true = CA de test Let's Encrypt (certificat non reconnu, sans quota) :
+# utile pour valider un premier déploiement sans risquer le rate limit.
+nginx_certbot_staging: false
+nginx_certbot_webroot: /var/www/certbot
+nginx_ssl_certificate: "/etc/letsencrypt/live/{{ nginx_server_name }}/fullchain.pem"
+nginx_ssl_certificate_key: "/etc/letsencrypt/live/{{ nginx_server_name }}/privkey.pem"
+
+nginx_site_name: sunu-boutik

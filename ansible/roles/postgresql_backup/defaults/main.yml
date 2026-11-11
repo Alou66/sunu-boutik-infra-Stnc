@@ -1,0 +1,30 @@
+---
+# Sauvegarde quotidienne PostgreSQL → S3 (voir docs/BACKUP_RESTORE.md).
+# Désactivée tant que le bucket n'existe pas (Terraform backup_enabled).
+postgresql_backup_enabled: false
+
+# Bucket et région : générés dans group_vars/all/terraform.yml par
+# scripts/generate_inventory.sh (output Terraform postgres_backup_bucket).
+postgresql_backup_bucket: ""
+postgresql_backup_region: eu-north-1
+# Doit correspondre à la variable Terraform backup_prefix (règles de
+# rétention et permissions IAM limitées à ce préfixe).
+postgresql_backup_prefix: "postgresql/{{ postgres_db }}"
+
+# Clé PUBLIQUE age (age1…) : donnée non sensible. La clé privée
+# correspondante reste hors du serveur (coffre de l'opérateur).
+postgresql_backup_age_recipient: ""
+
+# Horaire systemd (UTC) et jour de la sauvegarde hebdomadaire
+# (1 = lundi … 7 = dimanche).
+postgresql_backup_on_calendar: "*-*-* 02:30:00 UTC"
+postgresql_backup_weekly_day: 7
+# Seuil d'alerte de « sunu-boutik-pg-restore status ».
+postgresql_backup_max_age_hours: 26
+
+postgresql_backup_work_dir: /var/backups/sunu-boutik-pg
+postgresql_backup_version: "16"
+postgresql_backup_pg_service: "postgresql@{{ postgresql_backup_version }}-main.service"
+# AWS CLI v2 (snap officiel) : If-None-Match sur put-object requis.
+postgresql_backup_aws_bin: /snap/bin/aws
+postgresql_backup_aws_cli_min_version: "2.18.0"

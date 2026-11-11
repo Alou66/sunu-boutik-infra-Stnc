@@ -1,0 +1,22 @@
+---
+- name: Mise à jour apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Installation paquets de base
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - ufw
+      - unzip
+      - jq
+      - python3
+      - python3-pip
+    state: present
+
+- name: Configuration timezone
+  community.general.timezone:
+    name: UTC

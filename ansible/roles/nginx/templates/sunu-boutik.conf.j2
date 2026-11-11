@@ -1,0 +1,165 @@
+# {{ ansible_managed }}
+# Rendu par le rôle Ansible nginx vers
+# /etc/nginx/sites-available/{{ nginx_site_name }} : ne pas modifier à la main
+# ni copier ce template tel quel (les variables Jinja doivent être rendues).
+#
+# Architecture :
+#   Internet → Nginx (cet hôte, 80/443)
+#                ├─ /      → Next.js local     {{ nginx_frontend_upstream }}
+#                └─ /api/  → FastAPI privé     {{ nginx_backend_host }}:{{ nginx_backend_port }}
+#
+# Le backend n'est joignable que depuis le réseau privé du VPC (Security
+# Group backend : port {{ nginx_backend_port }} ouvert au seul SG frontend) ;
+# Next.js n'écoute que sur 127.0.0.1. Seuls 80 et 443 sont publics.
+#
+# Mode : {{ 'HTTPS (certificat présent)' if nginx_https_enabled else "HTTP seul (amorçage : en attente du certificat Let's Encrypt)" }}
+{% set canonical = nginx_server_name %}
+{% set all_names = [nginx_server_name] + nginx_server_aliases %}
+{% set legacy_http2 = nginx_version is version('1.25.1', '<') %}
+
+# Contexte http (les fichiers sites-enabled sont inclus dans le bloc http).
+upstream sunu_boutik_web {
+    server {{ nginx_frontend_upstream }};
+    keepalive 16;
+}
+
+upstream sunu_boutik_api {
+    server {{ nginx_backend_host }}:{{ nginx_backend_port }};
+    keepalive 16;
+}
+
+# WebSocket : `Connection: upgrade` seulement si le client le demande ;
+# sinon en-tête vide, ce qui permet le keepalive vers les upstreams.
+map $http_upgrade $sunu_boutik_connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
+limit_req_zone $binary_remote_addr zone=sunu_boutik_api:10m rate={{ nginx_api_rate }};
+
+{% macro proxy_headers() %}
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $sunu_boutik_connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+{%- endmacro %}
+
+{% macro app_locations() %}
+    client_max_body_size {{ nginx_client_max_body_size }};
+
+    # API FastAPI. Les routes FastAPI sont montées à la racine (/auth,
+    # /products, /invoices…, sans root_path) : le préfixe /api/ est donc
+    # RETIRÉ grâce au « / » final de proxy_pass
+    # (/api/products/1 → http://backend:{{ nginx_backend_port }}/products/1).
+    # Le build web doit utiliser NEXT_PUBLIC_API_URL=https://{{ canonical }}/api
+    location = /api {
+        return 301 /api/;
+    }
+
+    location /api/ {
+        limit_req zone=sunu_boutik_api burst={{ nginx_api_burst }} nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://sunu_boutik_api/;
+{{ proxy_headers() }}
+        proxy_connect_timeout {{ nginx_proxy_connect_timeout }};
+        proxy_send_timeout {{ nginx_proxy_send_timeout }};
+        proxy_read_timeout {{ nginx_proxy_read_timeout }};
+    }
+
+    # Frontend Next.js (URI transmise telle quelle).
+    location / {
+        proxy_pass http://sunu_boutik_web;
+{{ proxy_headers() }}
+        proxy_read_timeout {{ nginx_proxy_read_timeout }};
+    }
+{%- endmacro %}
+
+{% macro acme_location() %}
+    # Challenge ACME (émission et renouvellement par certbot --webroot).
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ nginx_certbot_webroot }};
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+{%- endmacro %}
+
+{% if not nginx_https_enabled %}
+# --- Amorçage : HTTP seul -------------------------------------------------
+# Sert le challenge ACME pour obtenir le premier certificat. Le rôle relance
+# le rendu en mode HTTPS dès que le certificat existe.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ all_names | join(' ') }};
+    server_tokens off;
+
+{{ acme_location() }}
+
+{{ app_locations() }}
+}
+{% else %}
+# --- Port 80 : ACME + redirection vers HTTPS ---------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ all_names | join(' ') }};
+    server_tokens off;
+
+{{ acme_location() }}
+
+    location / {
+        return 301 https://{{ canonical }}$request_uri;
+    }
+}
+
+{% macro ssl_params() %}
+    ssl_certificate {{ nginx_ssl_certificate }};
+    ssl_certificate_key {{ nginx_ssl_certificate_key }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SunuBoutikSSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+{%- endmacro %}
+
+{% if nginx_server_aliases %}
+# --- Alias (www…) : redirection vers le domaine canonique ------------------
+# Une seule origine pour le navigateur : évite les appels cross-origin vers
+# https://{{ canonical }}/api depuis un alias (CORS).
+server {
+    listen 443 ssl{{ ' http2' if legacy_http2 else '' }};
+    listen [::]:443 ssl{{ ' http2' if legacy_http2 else '' }};
+{% if not legacy_http2 %}
+    http2 on;
+{% endif %}
+    server_name {{ nginx_server_aliases | join(' ') }};
+    server_tokens off;
+
+{{ ssl_params() }}
+
+    return 301 https://{{ canonical }}$request_uri;
+}
+
+{% endif %}
+# --- Port 443 : application ----------------------------------------------
+server {
+    listen 443 ssl{{ ' http2' if legacy_http2 else '' }};
+    listen [::]:443 ssl{{ ' http2' if legacy_http2 else '' }};
+{% if not legacy_http2 %}
+    http2 on;
+{% endif %}
+    server_name {{ canonical }};
+    server_tokens off;
+
+{{ ssl_params() }}
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+{{ app_locations() }}
+}
+{% endif %}

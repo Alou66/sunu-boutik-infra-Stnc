@@ -1,0 +1,31 @@
+---
+# Les IP (frontend_public_ip, *_private_ip) et l'ID du volume PostgreSQL sont
+# générés dans group_vars/all/terraform.yml par scripts/generate_inventory.sh
+# depuis les outputs Terraform. Ne pas les redéfinir ici : à niveau égal,
+# vars.yml est chargé après terraform.yml et écraserait les valeurs.
+api_internal_url: "http://{{ backend_private_ip }}:8000"
+# Pour navigateur : chemin /api derrière Nginx (rôle nginx, préfixe retiré
+# avant FastAPI). Domaine et non IP : le certificat TLS ne couvre que le domaine.
+frontend_api_url: "https://sunu-boutique.online/api"
+
+# --- API : configuration non sensible -------------------------------------
+# Les secrets (db_*, secret_key, admin_password, smtp_password, ghcr_*) sont
+# dans vault.yml. Ne pas y redéfinir les clés ci-dessous : vault.yml est
+# chargé après vars.yml et les écraserait.
+
+# URL publique du site, sans « / » final : l'API y ajoute /login, /register.
+frontend_url: "https://sunu-boutique.online"
+cors_origins: "{{ frontend_url }}"
+
+# Compte administrateur créé au démarrage de l'API (mot de passe : vault).
+# OBLIGATOIRE : adresse réelle de l'administrateur, à renseigner avant le
+# premier déploiement (le rôle fastapi refuse une valeur vide ou d'exemple).
+admin_email: ""
+
+# SMTP (facultatif). smtp_user vide = envoi d'emails désactivé : l'API
+# journalise l'email non envoyé, le déploiement n'est pas bloqué. Renseigné,
+# smtp_password (vault) devient obligatoire.
+smtp_user: ""
+smtp_host: smtp.gmail.com
+smtp_port: 587
+smtp_sender_name: Sunu Boutik

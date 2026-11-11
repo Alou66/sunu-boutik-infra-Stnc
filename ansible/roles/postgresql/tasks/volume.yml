@@ -1,0 +1,145 @@
+---
+# Garde-fous : on ne formate que si la sonde bas niveau (blkid -p) ne trouve
+# AUCUNE signature (rc=2), et le module filesystem (force: false) refuse
+# lui-même d'écraser un système de fichiers existant.
+- name: Vérification du format de l'ID de volume EBS
+  ansible.builtin.assert:
+    that:
+      - postgresql_data_volume_id == '' or postgresql_data_volume_id is match('^vol-[0-9a-f]{8,17}$')
+    fail_msg: "postgresql_data_volume_id invalide : '{{ postgresql_data_volume_id }}'."
+    quiet: true
+
+# Nitro : le numéro de série NVMe du disque est l'ID du volume sans tiret.
+- name: Choix du chemin du périphérique
+  ansible.builtin.set_fact:
+    postgresql_device_path: >-
+      {{ ('/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_' ~ (postgresql_data_volume_id | replace('-', '')))
+         if postgresql_data_volume_id | length > 0 else postgresql_data_device }}
+
+- name: Présence du périphérique
+  ansible.builtin.stat:
+    path: "{{ postgresql_device_path }}"
+    follow: true
+  register: postgresql_device_stat
+
+- name: Le périphérique doit exister et être un périphérique bloc
+  ansible.builtin.assert:
+    that:
+      - postgresql_device_stat.stat.exists
+      - postgresql_device_stat.stat.isblk | default(false)
+    fail_msg: >-
+      {{ postgresql_device_path }} est absent ou n'est pas un périphérique bloc.
+      Sur une instance Nitro, /dev/xvdf n'existe pas : renseigner postgresql_data_volume_id.
+    quiet: true
+
+- name: Résolution du nom noyau du périphérique
+  ansible.builtin.command: readlink -e {{ postgresql_device_path }}
+  register: postgresql_device_real
+  changed_when: false
+  check_mode: false
+
+- name: Type du périphérique et de ses enfants
+  ansible.builtin.command: lsblk -nr -o TYPE {{ postgresql_device_real.stdout }}
+  register: postgresql_device_lsblk
+  changed_when: false
+  check_mode: false
+
+# Exclut une partition, un disque partitionné (dont le disque système).
+- name: Le périphérique doit être un disque entier sans partition
+  ansible.builtin.assert:
+    that:
+      - postgresql_device_lsblk.stdout_lines == ['disk']
+    fail_msg: "{{ postgresql_device_real.stdout }} n'est pas un disque entier non partitionné ({{ postgresql_device_lsblk.stdout_lines }})."
+    quiet: true
+
+- name: Points de montage actuels du périphérique
+  ansible.builtin.command: findmnt -rn -o TARGET --source {{ postgresql_device_real.stdout }}
+  register: postgresql_device_mounts
+  changed_when: false
+  failed_when: postgresql_device_mounts.rc not in [0, 1]
+  check_mode: false
+
+- name: Périphérique actuellement monté sur le point de montage {{ postgresql_data_mount }}
+  ansible.builtin.command: findmnt -rn -o SOURCE --mountpoint {{ postgresql_data_mount }}
+  register: postgresql_mount_source
+  changed_when: false
+  failed_when: postgresql_mount_source.rc not in [0, 1]
+  check_mode: false
+
+- name: Aucun autre montage ne doit être en conflit
+  ansible.builtin.assert:
+    that:
+      - postgresql_device_mounts.stdout_lines | difference([postgresql_data_mount]) | length == 0
+      - postgresql_mount_source.rc == 1 or postgresql_mount_source.stdout == postgresql_device_real.stdout
+    fail_msg: >-
+      Conflit de montage : périphérique monté sur {{ postgresql_device_mounts.stdout_lines }},
+      {{ postgresql_data_mount }} occupé par '{{ postgresql_mount_source.stdout }}'.
+    quiet: true
+
+- name: Détection d'une signature existante (sonde bas niveau, sans cache)
+  ansible.builtin.command: blkid -p -o export {{ postgresql_device_real.stdout }}
+  register: postgresql_blkid
+  changed_when: false
+  # 0 = signature trouvée, 2 = aucune signature ; tout autre code = arrêt
+  failed_when: postgresql_blkid.rc not in [0, 2]
+  check_mode: false
+
+- name: Lecture du type de signature
+  ansible.builtin.set_fact:
+    postgresql_device_fstype: "{{ postgresql_blkid.stdout | regex_search('^TYPE=(.*)$', '\\1', multiline=True) | default([''], true) | first }}"
+    postgresql_device_pttype: "{{ postgresql_blkid.stdout | regex_search('^PTTYPE=(.*)$', '\\1', multiline=True) | default([''], true) | first }}"
+
+- name: Un volume non vierge doit déjà être au format {{ postgresql_data_fstype }}
+  ansible.builtin.assert:
+    that:
+      - postgresql_device_pttype == ''
+      - postgresql_device_fstype == postgresql_data_fstype
+    fail_msg: >-
+      {{ postgresql_device_real.stdout }} contient déjà une signature
+      (TYPE='{{ postgresql_device_fstype }}', PTTYPE='{{ postgresql_device_pttype }}') :
+      aucun formatage ni montage automatique, intervention manuelle requise.
+    quiet: true
+  when: postgresql_blkid.rc == 0
+
+- name: Formatage du volume vierge en {{ postgresql_data_fstype }}
+  community.general.filesystem:
+    fstype: "{{ postgresql_data_fstype }}"
+    dev: "{{ postgresql_device_real.stdout }}"
+    force: false
+  when: postgresql_blkid.rc == 2
+
+- name: Lecture de l'UUID du système de fichiers
+  ansible.builtin.command: blkid -p -s UUID -o value {{ postgresql_device_real.stdout }}
+  register: postgresql_device_uuid
+  changed_when: false
+  # En --check, un volume vierge n'a pas encore été formaté
+  failed_when: not ansible_check_mode and (postgresql_device_uuid.rc != 0 or postgresql_device_uuid.stdout | length == 0)
+  check_mode: false
+
+# nofail : un volume absent au boot ne bloque pas l'instance en mode urgence ;
+# PostgreSQL, lui, attend le montage (drop-in RequiresMountsFor, config.yml).
+- name: Montage persistant par UUID
+  ansible.posix.mount:
+    path: "{{ postgresql_data_mount }}"
+    src: "UUID={{ postgresql_device_uuid.stdout }}"
+    fstype: "{{ postgresql_data_fstype }}"
+    opts: defaults,noatime,nofail
+    state: mounted
+  when: postgresql_device_uuid.stdout | length > 0
+
+- name: Vérification que le volume attendu est monté
+  ansible.builtin.command: findmnt -rn -o UUID --mountpoint {{ postgresql_data_mount }}
+  register: postgresql_mounted_uuid
+  changed_when: false
+  failed_when: postgresql_mounted_uuid.stdout != postgresql_device_uuid.stdout
+  check_mode: false
+  when: not ansible_check_mode
+
+# Après le montage : s'applique à la racine du système de fichiers EBS.
+- name: Propriétaire et droits de la racine du volume
+  ansible.builtin.file:
+    path: "{{ postgresql_data_mount }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"

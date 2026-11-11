@@ -1,0 +1,37 @@
+aws_region          = "eu-north-1"
+project_name        = "sunu-boutik"
+vpc_cidr            = "10.20.0.0/16"
+public_subnet_cidr  = "10.20.1.0/24"
+private_subnet_cidr = "10.20.11.0/24"
+availability_zone   = "eu-north-1a"
+
+# OBLIGATOIRE — impact coût, voir terraform/README.md :
+#   nat_gateway   : apt + GHCR + SSM fonctionnent (NAT Gateway facturée)
+#   vpc_endpoints : SSM seul ; apt et GHCR KO sur backend/database
+#   none          : instances privées isolées
+private_egress_mode = "nat_gateway"
+
+# IP admin /32 (curl -s https://checkip.amazonaws.com). Laisser commenté
+# pour une administration via SSM uniquement (aucun port 22 ouvert).
+# allowed_ssh_cidr = "203.0.113.10/32"
+
+key_name = "votre-cle-ssh"
+# ami_id = "ami-xxxxxxxxxxxxxxxxx" # recommandé : figer l'AMI
+
+instance_type_frontend    = "t3.small"
+instance_type_backend     = "t3.small"
+instance_type_database    = "t3.small"
+volume_size_frontend      = 20
+volume_size_backend       = 20
+volume_size_database_root = 20
+volume_size_database      = 30
+volume_type               = "gp3"
+termination_protection    = true
+
+# Sauvegardes PostgreSQL vers S3 (ansible/docs/BACKUP_RESTORE.md). Activer
+# change le profil IAM de l'instance database (sans la recréer).
+backup_enabled = false
+# backup_bucket_name         = ""  # vide = sunu-boutik-pg-backups-<ID compte>
+# backup_prefix              = "postgresql/sunuboutik"
+# backup_daily_retention_days  = 7
+# backup_weekly_retention_days = 28

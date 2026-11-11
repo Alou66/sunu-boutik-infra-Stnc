@@ -1,0 +1,13 @@
+---
+# Versions déployées en production : une image GHCR par commit Git, taguée
+# `sha-<SHA complet du commit>` par les workflows des repos api et web.
+#
+# Ce fichier est la référence de ce qui tourne en prod : le modifier, le
+# commiter, puis lancer le playbook. Son historique Git sert de journal des
+# déploiements et donne la version à restaurer en cas de rollback
+# (voir ansible/DEPLOYMENT.md). Un override ponctuel reste possible :
+#   ansible-playbook playbooks/backend.yml --tags deploy -e api_image_tag=sha-...
+#
+# Vides par défaut : le playbook refuse de déployer sans tag explicite.
+api_image_tag: "sha-ca582d3294cd3bb94a5d043c658c4bcdc1a6e138"
+web_image_tag: "sha-d42d50e36cdb4ccb5f621a5c7102c801e9a2f854"

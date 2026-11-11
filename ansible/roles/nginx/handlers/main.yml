@@ -1,0 +1,15 @@
+---
+# Un seul événement, « reload nginx », et une seule action sur le service
+# (reload, jamais restart en parallèle). Les handlers s'exécutent dans
+# l'ordre de ce fichier : si `nginx -t` échoue, le play s'arrête avant le
+# reload et le Nginx en cours continue de tourner avec l'ancienne config.
+- name: Tester la configuration Nginx avant rechargement
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  listen: reload nginx
+
+- name: Recharger Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  listen: reload nginx

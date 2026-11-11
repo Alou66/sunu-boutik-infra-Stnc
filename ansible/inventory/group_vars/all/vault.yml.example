@@ -1,0 +1,29 @@
+# FICHIER À CHIFFRER AVEC ansible-vault
+# Ne jamais commiter la version non chiffrée
+# Créer: ansible-vault create inventory/group_vars/all/vault.yml
+# Ou: ansible-vault encrypt inventory/group_vars/all/vault.yml
+#
+# UNIQUEMENT les secrets. Valeurs FICTIVES ci-dessous, toutes à remplacer.
+# La configuration non sensible (admin_email, frontend_url, cors_origins,
+# smtp_user, nginx_certbot_email…) est dans group_vars/all/vars.yml et
+# group_vars/frontend.yml : ne pas la redéfinir ici (vault.yml est chargé
+# après vars.yml et l'écraserait).
+
+# GitHub Container Registry : PAT avec le seul scope read:packages
+ghcr_username: "CHANGE_ME"
+ghcr_token: "CHANGE_ME"
+
+# PostgreSQL (DATABASE_URL est construite par le rôle fastapi)
+db_user: "CHANGE_ME"
+db_password: "CHANGE_ME"
+
+# 32 caractères minimum :
+#   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+secret_key: "CHANGE_ME_GENERATE_RANDOM"
+
+# Mot de passe du compte admin_email (vars.yml)
+admin_password: "CHANGE_ME"
+
+# Mot de passe d'application Gmail du compte smtp_user (vars.yml).
+# Vide si smtp_user est vide (envoi d'emails désactivé).
+smtp_password: ""

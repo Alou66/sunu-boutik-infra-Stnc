@@ -1,0 +1,20 @@
+---
+- name: Création utilisateur PostgreSQL applicatif
+  community.postgresql.postgresql_user:
+    name: "{{ db_user }}"
+    password: "{{ db_password }}"
+    role_attr_flags: LOGIN,NOSUPERUSER,NOCREATEDB,NOCREATEROLE
+    login_port: "{{ postgres_port }}"
+  become: true
+  become_user: postgres
+  no_log: true
+
+- name: Création base PostgreSQL applicative
+  community.postgresql.postgresql_db:
+    name: "{{ postgres_db }}"
+    owner: "{{ db_user }}"
+    encoding: UTF-8
+    template: template0
+    login_port: "{{ postgres_port }}"
+  become: true
+  become_user: postgres

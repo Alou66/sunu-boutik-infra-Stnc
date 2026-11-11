@@ -1,0 +1,11 @@
+---
+# Variables communes non sensibles
+project_name: sunu-boutik
+docker_registry: ghcr.io
+# Dépôts GHCR (sans tag). Le tag déployé est fixé dans release.yml : jamais
+# `latest` en production (non traçable, et l'image précédente devient
+# orpheline à chaque pull, ce qui empêche tout rollback).
+api_image_repo: ghcr.io/alou66/sunu-boutik-api-stnc
+web_image_repo: ghcr.io/alou66/sunu-boutik-web-stnc
+postgres_db: sunuboutik
+postgres_port: 5432

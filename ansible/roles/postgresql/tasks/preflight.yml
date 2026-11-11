@@ -1,0 +1,33 @@
+---
+- name: Vérification du système (Ubuntu attendu)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+    fail_msg: "Rôle prévu pour Ubuntu (postgresql-common)."
+    quiet: true
+
+- name: Vérification des identifiants applicatifs (Vault)
+  ansible.builtin.assert:
+    that:
+      - db_user is defined
+      - db_user | length > 0
+      - db_password is defined
+      - db_password | length >= 12
+      - db_password != 'CHANGE_ME'
+    fail_msg: "db_user / db_password doivent être définis dans Ansible Vault (mot de passe de 12 caractères minimum)."
+    quiet: true
+  no_log: true
+
+- name: Vérification de l'adresse du backend autorisé
+  ansible.builtin.assert:
+    that:
+      - postgresql_allowed_client is match('^(\d{1,3}\.){3}\d{1,3}$')
+    fail_msg: "backend_private_ip doit contenir l'IP privée du backend (actuellement : '{{ postgresql_allowed_client }}')."
+    quiet: true
+
+- name: Vérification de l'adresse d'écoute
+  ansible.builtin.assert:
+    that:
+      - postgresql_listen_address is match('^(\d{1,3}\.){3}\d{1,3}$')
+    fail_msg: "Adresse privée du serveur database introuvable."
+    quiet: true

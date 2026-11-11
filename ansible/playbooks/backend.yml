@@ -1,0 +1,12 @@
+---
+# Serveur API : seul hôte qui exécute le conteneur FastAPI.
+- name: Backend - FastAPI
+  hosts: backend
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker
+      tags: [docker]
+    - role: fastapi
+      tags: [api, deploy]

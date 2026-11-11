@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Chargé via include_dir = 'conf.d' (ajouté par pg_createcluster).
+listen_addresses = 'localhost,{{ postgresql_listen_address }}'
+password_encryption = 'scram-sha-256'
+ssl = on

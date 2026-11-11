@@ -1,0 +1,70 @@
+---
+# Méthode postgresql-common : pg_createcluster -d crée la config dans
+# /etc/postgresql/<v>/<c>, lance initdb dans le répertoire du volume et y
+# fixe data_directory. Aucune suppression ni déplacement de données.
+- name: Cluster déjà enregistré auprès de postgresql-common
+  ansible.builtin.stat:
+    path: "{{ postgresql_conf_dir }}/postgresql.conf"
+  register: postgresql_cluster_conf
+
+- name: Données PostgreSQL déjà présentes sur le volume
+  ansible.builtin.stat:
+    path: "{{ postgresql_data_directory }}/PG_VERSION"
+  register: postgresql_cluster_pgversion
+
+- name: Arrêt si des données existent sans cluster enregistré
+  ansible.builtin.assert:
+    that:
+      - postgresql_cluster_conf.stat.exists or not postgresql_cluster_pgversion.stat.exists
+    fail_msg: >-
+      {{ postgresql_data_directory }} contient déjà un cluster non enregistré dans
+      {{ postgresql_conf_dir }} : aucune initialisation automatique, intervention manuelle requise.
+    quiet: true
+
+- name: Répertoire de données du cluster enregistré
+  ansible.builtin.command: pg_conftool -s {{ postgresql_version }} {{ postgresql_cluster }} show data_directory
+  register: postgresql_cluster_datadir
+  changed_when: false
+  check_mode: false
+  when: postgresql_cluster_conf.stat.exists
+
+- name: Le cluster enregistré doit être sur le volume EBS
+  ansible.builtin.assert:
+    that:
+      - postgresql_cluster_datadir.stdout == postgresql_data_directory
+    fail_msg: >-
+      Le cluster {{ postgresql_version }}/{{ postgresql_cluster }} existe déjà dans
+      '{{ postgresql_cluster_datadir.stdout }}' : rien n'est déplacé ni supprimé automatiquement.
+    quiet: true
+  when: postgresql_cluster_conf.stat.exists
+
+# pg_createcluster ne crée pas le parent quand -d est fourni.
+- name: Répertoire parent du cluster sur le volume
+  ansible.builtin.file:
+    path: "{{ postgresql_data_directory | dirname }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Création du cluster sur le volume EBS
+  ansible.builtin.command: >-
+    pg_createcluster
+    --datadir={{ postgresql_data_directory }}
+    --port={{ postgres_port }}
+    --encoding=UTF8
+    --locale=C.UTF-8
+    --start-conf=auto
+    {{ postgresql_version }} {{ postgresql_cluster }}
+    -- --data-checksums
+  args:
+    creates: "{{ postgresql_conf_dir }}/postgresql.conf"
+
+- name: Propriétaire et droits du répertoire de données
+  ansible.builtin.file:
+    path: "{{ postgresql_data_directory }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+  when: not ansible_check_mode or postgresql_cluster_conf.stat.exists

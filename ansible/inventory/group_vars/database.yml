@@ -1,0 +1,15 @@
+---
+# Variables database - SECRETS DANS ANSIBLE VAULT
+postgresql_data_device: /dev/xvdf
+postgresql_data_mount: /data/postgres
+# postgresql_data_volume_id (indispensable sur Nitro) est généré dans
+# group_vars/all/terraform.yml depuis l'output Terraform postgres_data_volume_id.
+
+# Sauvegardes PostgreSQL → S3 (rôle postgresql_backup, docs/BACKUP_RESTORE.md).
+# Passer à true après « terraform apply » avec backup_enabled = true et
+# régénération de l'inventaire (postgresql_backup_bucket dans terraform.yml).
+postgresql_backup_enabled: false
+# Clé PUBLIQUE age (non sensible), générée HORS du serveur :
+#   age-keygen -o sunu-boutik-backup.key   # clé privée : coffre de l'opérateur
+#   age-keygen -y sunu-boutik-backup.key   # clé publique à copier ici
+postgresql_backup_age_recipient: ""

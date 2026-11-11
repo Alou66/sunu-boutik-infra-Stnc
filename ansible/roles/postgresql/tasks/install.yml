@@ -1,0 +1,28 @@
+---
+# postgresql-common seul d'abord : il fournit createcluster.conf et crée
+# l'utilisateur système postgres, sans installer de serveur.
+- name: Installation de postgresql-common et des dépendances
+  ansible.builtin.apt:
+    name:
+      - postgresql-common
+      # Fichiers temporaires lisibles par become_user: postgres
+      - acl
+      - python3-psycopg2
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Lu par le postinst de postgresql-16 (pg_conftool sur ce fichier précis) :
+# empêche la création du cluster "main" dans /var/lib/postgresql.
+- name: Désactivation de la création automatique du cluster main
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql-common/createcluster.conf
+    regexp: '^#?\s*create_main_cluster\s*='
+    line: "create_main_cluster = false"
+
+- name: Installation de PostgreSQL {{ postgresql_version }}
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ postgresql_version }}"
+      - "postgresql-client-{{ postgresql_version }}"
+    state: present

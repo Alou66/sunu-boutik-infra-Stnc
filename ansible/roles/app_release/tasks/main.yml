@@ -1,0 +1,115 @@
+---
+- name: "Tag d'image immuable ({{ app_release_name }})"
+  ansible.builtin.assert:
+    that:
+      - app_release_repo | length > 0
+      - app_release_tag is match('^sha-[0-9a-f]{40}$')
+    fail_msg: >-
+      Tag invalide pour {{ app_release_name }} : '{{ app_release_tag }}'.
+      Attendu : sha-<SHA complet du commit> (voir inventory/group_vars/all/release.yml).
+      `latest` et les tags mutables sont refusés en production.
+    quiet: true
+
+- name: Image cible
+  ansible.builtin.set_fact:
+    app_release_image: "{{ app_release_repo }}:{{ app_release_tag }}"
+
+- name: "Conteneur actuellement déployé ({{ app_release_name }})"
+  community.docker.docker_container_info:
+    name: "{{ app_release_name }}"
+  register: app_release_current
+
+- name: Image précédente (cible du rollback automatique)
+  ansible.builtin.set_fact:
+    app_release_previous_image: >-
+      {{ app_release_current.container.Config.Image
+         if app_release_current.exists else '' }}
+
+- name: "Pull {{ app_release_image }}"
+  community.docker.docker_image:
+    name: "{{ app_release_repo }}"
+    tag: "{{ app_release_tag }}"
+    source: pull
+
+- name: Déploiement avec retour automatique en cas d'échec
+  block:
+    - name: "Démarrage {{ app_release_name }}"
+      community.docker.docker_container:
+        name: "{{ app_release_name }}"
+        image: "{{ app_release_image }}"
+        restart_policy: unless-stopped
+        state: started
+        recreate: "{{ app_release_force_recreate | bool }}"
+        env_file: "{{ app_release_env_file or omit }}"
+        ports: "{{ app_release_ports }}"
+      register: app_release_container
+
+    - name: "Santé {{ app_release_name }}"
+      ansible.builtin.uri:
+        url: "{{ app_release_health_url }}"
+        status_code: 200
+      register: app_release_health
+      until: app_release_health.status == 200
+      retries: "{{ app_release_health_retries }}"
+      delay: "{{ app_release_health_delay }}"
+
+  rescue:
+    - name: "Rollback vers {{ app_release_previous_image }}"
+      community.docker.docker_container:
+        name: "{{ app_release_name }}"
+        image: "{{ app_release_previous_image }}"
+        restart_policy: unless-stopped
+        state: started
+        recreate: true
+        env_file: "{{ app_release_env_file or omit }}"
+        ports: "{{ app_release_ports }}"
+      when:
+        - app_release_previous_image | length > 0
+        - app_release_previous_image != app_release_image
+
+    - name: "Échec du déploiement {{ app_release_name }}"
+      ansible.builtin.fail:
+        msg: >-
+          {{ app_release_image }} n'a pas passé le contrôle de santé
+          ({{ app_release_health_url }}).
+          {{ ('Image précédente restaurée : ' ~ app_release_previous_image)
+             if (app_release_previous_image | length > 0
+                 and app_release_previous_image != app_release_image)
+             else 'Aucune image précédente à restaurer.' }}
+
+- name: Journal des déploiements (changement d'image)
+  when: app_release_previous_image != app_release_image
+  block:
+    - name: Répertoire du journal
+      ansible.builtin.file:
+        path: "{{ app_release_log_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: "Entrée de journal ({{ app_release_name }})"
+      ansible.builtin.lineinfile:
+        path: "{{ app_release_log_dir }}/{{ app_release_name }}.log"
+        line: >-
+          {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+          previous={{ app_release_previous_image or 'none' }}
+          current={{ app_release_image }}
+        create: true
+        mode: "0644"
+
+# `docker image ls <repo>` trie du plus récent au plus ancien. Les images
+# encore utilisées par un conteneur ne peuvent pas être supprimées
+# (l'erreur est ignorée).
+- name: "Nettoyage des anciennes images, hors courante et précédente : {{ app_release_repo }}"
+  ansible.builtin.shell: |
+    set -eu
+    i=0
+    for ref in $(docker image ls {{ app_release_repo | quote }} --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}'); do
+      i=$((i + 1))
+      case "$ref" in *:'<none>') continue ;; esac
+      [ "$i" -le {{ app_release_keep_images | int }} ] && continue
+      [ "$ref" = {{ app_release_image | quote }} ] && continue
+      [ "$ref" = {{ (app_release_previous_image or '-') | quote }} ] && continue
+      docker image rm "$ref" >/dev/null 2>&1 && echo "supprimée : $ref" || true
+    done
+  register: app_release_prune
+  changed_when: "'supprimée' in app_release_prune.stdout"

@@ -1,0 +1,44 @@
+name: Validate infra
+
+# Vérifications statiques uniquement : aucune connexion aux serveurs, aucun
+# déploiement. Le déploiement se fait par Ansible depuis un poste opérateur
+# (ansible/DEPLOYMENT.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    env:
+      ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.cfg
+      ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/.ansible/collections
+      ANSIBLE_ROLES_PATH: ${{ github.workspace }}/ansible/roles
+      # Le vault chiffré n'est pas commité ; un fichier factice suffit au
+      # syntax-check.
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/vault-pass
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Ansible
+        run: |
+          pipx install --include-deps ansible-core
+          pipx install ansible-lint
+          ansible-galaxy collection install -r ansible/requirements.yml -p "$ANSIBLE_COLLECTIONS_PATH"
+          echo dummy > /tmp/vault-pass
+
+      - name: Syntax check
+        run: |
+          for p in ansible/playbooks/*.yml; do
+            ansible-playbook --syntax-check -i ansible/inventory/hosts.ini.example "$p"
+          done
+
+      - name: Lint
+        run: ansible-lint ansible/roles ansible/playbooks

@@ -1,0 +1,29 @@
+---
+# Ordre imposé :
+#   1. préconditions (variables, OS)
+#   2. paquets, sans création automatique du cluster "main" dans /var/lib
+#   3. volume EBS : contrôle, formatage s'il est vierge, montage par UUID
+#   4. cluster créé avec pg_createcluster directement sur le volume
+#   5. configuration réseau / pg_hba, démarrage
+#   6. utilisateur et base applicatifs
+#   7. vérifications finales
+- name: Préconditions
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Installation des paquets
+  ansible.builtin.import_tasks: install.yml
+
+- name: Préparation du volume de données
+  ansible.builtin.import_tasks: volume.yml
+
+- name: Création du cluster
+  ansible.builtin.import_tasks: cluster.yml
+
+- name: Configuration et démarrage
+  ansible.builtin.import_tasks: config.yml
+
+- name: Utilisateur et base applicatifs
+  ansible.builtin.import_tasks: database.yml
+
+- name: Vérifications
+  ansible.builtin.import_tasks: verify.yml

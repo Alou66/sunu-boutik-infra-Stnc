@@ -109,45 +109,32 @@ Deux volumes Docker nommés sont créés :
 
 Ils survivent à `docker compose down` ; seul `docker compose down -v` les supprime.
 
-## Déploiement continu (CI/CD)
+## Production (3 EC2) et CI/CD
 
-Chaque repo (`sunu-boutik-api`, `sunu-boutik-web`, `sunu-boutik-infra`) a son
-propre workflow GitHub Actions (`.github/workflows/deploy.yml`), déclenché à
-chaque push sur `main` :
+`docker-compose.yml` ne sert qu'au **développement local**. La production
+tourne sur trois EC2 configurées par Ansible (`ansible/`) :
 
-- **api / web** : build de l'image Docker, push sur GitHub Container Registry
-  (`ghcr.io/alou66/sunu-boutik-api` / `-web`), puis connexion SSH au serveur
-  pour `docker compose -f docker-compose.prod.yml pull` + `up -d --wait` du
-  seul service concerné (migrations Alembic appliquées automatiquement après
-  le redémarrage de `api`), et enfin un health-check public pour valider le
-  déploiement.
-- **infra** : `git pull` sur le serveur, redéploiement de la config Nginx
-  (`deploy/nginx.conf`), et `docker compose -f docker-compose.prod.yml up -d --wait`
-  pour appliquer tout changement du compose de prod.
-
-`docker-compose.prod.yml` (utilisé uniquement sur le serveur) référence des
-images déjà construites par la CI (`image:`) — contrairement à
-`docker-compose.yml` (dev local, `build:`) — pour éviter de compiler sur
-l'instance EC2 à faibles ressources.
-
-Secrets GitHub Actions à configurer dans **chacun des 3 repos** (Settings →
-Secrets and variables → Actions → *Secrets*) :
-
-| Secret | Valeur |
+| EC2 | Contenu |
 |---|---|
-| `EC2_HOST` | IP publique du serveur (ex. `51.20.138.11`) |
-| `EC2_USER` | `ubuntu` |
-| `EC2_SSH_KEY` | Contenu de la clé privée `.pem` |
+| frontend | conteneur Next.js (`127.0.0.1:3000`) + Nginx (80/443, Let's Encrypt) |
+| backend | conteneur FastAPI (`<IP privée>:8000`, joignable depuis le frontend seulement) |
+| database | PostgreSQL 16 installé sur l'hôte, données sur EBS dédié (pas de Docker) |
 
-Et dans `sunu-boutik-web` uniquement (onglet *Variables*, pas *Secrets* — la
-valeur est publique, inlinée dans le bundle JS) :
+Build, publication et déploiement sont séparés :
 
-| Variable | Valeur |
-|---|---|
-| `NEXT_PUBLIC_API_URL` | `http://51.20.138.11/api` |
+1. **Build + publication** (automatique) : chaque push sur `main` des repos
+   `sunu-boutik-api` / `sunu-boutik-web` lance `.github/workflows/build.yml`,
+   qui publie `ghcr.io/alou66/sunu-boutik-{api,web}-stnc:sha-<commit>`.
+   Aucun tag `latest`, aucune connexion aux serveurs. L'image web est
+   construite avec `NEXT_PUBLIC_API_URL=/api` (inliné au build).
+2. **Validation infra** (automatique) : `.github/workflows/validate.yml`
+   (syntax-check + ansible-lint), sans déploiement.
+3. **Déploiement** (manuel) : choix des tags dans
+   `ansible/inventory/group_vars/all/release.yml` puis `ansible-playbook`.
+   Procédure complète et rollback : [ansible/DEPLOYMENT.md](ansible/DEPLOYMENT.md).
 
-`GITHUB_TOKEN` (push/pull vers GHCR) est fourni automatiquement par Actions,
-aucune configuration nécessaire.
+L'ancien déploiement sur une seule EC2 (`docker-compose.prod.yml`,
+`deploy/nginx.conf`, workflows SSH) est archivé dans [legacy/](legacy/).
 
 ## Développement vs production
 

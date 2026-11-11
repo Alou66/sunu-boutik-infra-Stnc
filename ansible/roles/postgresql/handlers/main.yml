@@ -1,0 +1,15 @@
+---
+# Ordre de définition = ordre d'exécution des handlers.
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart postgresql
+  ansible.builtin.systemd_service:
+    name: "{{ postgresql_service }}"
+    state: restarted
+
+- name: Reload postgresql
+  ansible.builtin.systemd_service:
+    name: "{{ postgresql_service }}"
+    state: reloaded

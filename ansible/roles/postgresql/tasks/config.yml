@@ -1,0 +1,62 @@
+---
+- name: Paramètres réseau et authentification (conf.d)
+  ansible.builtin.template:
+    src: sunu-boutik.conf.j2
+    dest: "{{ postgresql_conf_dir }}/conf.d/50-sunu-boutik.conf"
+    owner: postgres
+    group: postgres
+    mode: "0644"
+  notify: Restart postgresql
+
+# Les règles par défaut d'Ubuntu ne couvrent que le socket local et
+# 127.0.0.1/::1 : aucune autre connexion réseau n'est acceptée.
+- name: Accès réseau réservé au backend (pg_hba.conf)
+  ansible.builtin.blockinfile:
+    path: "{{ postgresql_conf_dir }}/pg_hba.conf"
+    marker: "# {mark} ANSIBLE sunu-boutik backend"
+    block: |
+      hostssl {{ postgres_db }} {{ db_user }} {{ postgresql_allowed_client }}/32 scram-sha-256
+  notify: Reload postgresql
+
+- name: Répertoire de surcharge systemd du cluster
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ postgresql_service }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Démarrage du cluster conditionné au montage du volume
+  ansible.builtin.template:
+    src: data-mount.conf.j2
+    dest: "/etc/systemd/system/{{ postgresql_service }}.service.d/data-mount.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+# postgresql.service démarre au boot les clusters dont start.conf = auto.
+- name: Activation du service PostgreSQL au démarrage
+  ansible.builtin.systemd_service:
+    name: postgresql
+    enabled: true
+
+- name: Démarrage du cluster
+  ansible.builtin.systemd_service:
+    name: "{{ postgresql_service }}"
+    state: started
+
+- name: Application immédiate des changements de configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Attente de PostgreSQL en local
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ postgres_port }}"
+    timeout: 60
+
+- name: Attente de PostgreSQL sur l'adresse privée
+  ansible.builtin.wait_for:
+    host: "{{ postgresql_listen_address }}"
+    port: "{{ postgres_port }}"
+    timeout: 60

@@ -1,0 +1,116 @@
+---
+# Sauvegarde PostgreSQL : scripts, configuration et timer systemd. Aucune
+# sauvegarde n'est lancée par ce rôle (premier passage : timer, ou
+# « systemctl start sunu-boutik-pg-backup.service » à la main).
+- name: Vérification de la configuration de sauvegarde
+  ansible.builtin.assert:
+    that:
+      - postgresql_backup_bucket is match('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+      - postgresql_backup_age_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+      - postgresql_backup_prefix is match('^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$')
+      - postgresql_backup_weekly_day | int in range(1, 8)
+      - postgresql_backup_region is match('^[a-z]{2}(-[a-z]+)+-[0-9]$')
+    fail_msg: >-
+      postgresql_backup_bucket (output Terraform postgres_backup_bucket, via
+      generate_inventory.sh) et postgresql_backup_age_recipient (clé publique
+      age1…, group_vars/database.yml) sont requis quand
+      postgresql_backup_enabled est vrai.
+    quiet: true
+
+- name: Installation de age (chiffrement des sauvegardes)
+  ansible.builtin.apt:
+    name: age
+    state: present
+
+# Ubuntu 24.04 ne fournit plus de paquet awscli : snap officiel d'AWS.
+- name: Installation de l'AWS CLI v2
+  community.general.snap:
+    name: aws-cli
+    classic: true
+    state: present
+
+- name: Version de l'AWS CLI
+  ansible.builtin.command: "{{ postgresql_backup_aws_bin }} --version"
+  register: postgresql_backup_aws_version
+  changed_when: false
+  check_mode: false
+
+- name: AWS CLI compatible avec les écritures conditionnelles (If-None-Match)
+  ansible.builtin.assert:
+    that:
+      - >-
+        (postgresql_backup_aws_version.stdout | regex_search('aws-cli/([0-9.]+)', '\1') | first)
+        is version(postgresql_backup_aws_cli_min_version, '>=')
+    fail_msg: "AWS CLI >= {{ postgresql_backup_aws_cli_min_version }} requise ({{ postgresql_backup_aws_version.stdout }})."
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Répertoires des scripts et de la configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /usr/local/lib/sunu-boutik
+    - /etc/sunu-boutik
+
+# Fichiers temporaires uniquement (supprimés après chaque exécution) ; sur le
+# volume racine chiffré, jamais sur le volume de données PostgreSQL.
+- name: Répertoire de travail des sauvegardes
+  ansible.builtin.file:
+    path: "{{ postgresql_backup_work_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Bibliothèque commune des scripts
+  ansible.builtin.copy:
+    src: pg-backup-common.sh
+    dest: /usr/local/lib/sunu-boutik/pg-backup-common.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Scripts de sauvegarde et de restauration
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/sbin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - sunu-boutik-pg-backup
+    - sunu-boutik-pg-restore
+
+# Lisible par postgres, modifiable par root seul (contrôlé par les scripts).
+- name: Configuration des sauvegardes
+  ansible.builtin.template:
+    src: pg-backup.conf.j2
+    dest: /etc/sunu-boutik/pg-backup.conf
+    owner: root
+    group: postgres
+    mode: "0640"
+
+- name: Service et timer systemd
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - sunu-boutik-pg-backup.service
+    - sunu-boutik-pg-backup.timer
+  notify: Reload systemd (backup)
+
+- name: Application des unités systemd
+  ansible.builtin.meta: flush_handlers
+
+- name: Activation du timer de sauvegarde quotidienne
+  ansible.builtin.systemd_service:
+    name: sunu-boutik-pg-backup.timer
+    enabled: true
+    state: started

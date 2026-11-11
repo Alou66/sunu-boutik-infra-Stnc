@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+# Le cluster ne démarre qu'une fois le volume EBS monté.
+[Unit]
+RequiresMountsFor={{ postgresql_data_mount }}

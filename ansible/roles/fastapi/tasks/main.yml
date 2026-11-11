@@ -1,0 +1,43 @@
+---
+# Backend : uniquement le conteneur FastAPI. PostgreSQL tourne sur l'hôte
+# database (rôle postgresql), jamais dans Docker.
+#
+# Schéma de la base : Base.metadata.create_all() au démarrage de l'API crée
+# les tables manquantes sur une base neuve. AUCUNE migration Alembic n'est
+# lancée ici : sur une base existante, elles sont appliquées à la main après
+# audit (voir DEPLOYMENT.md, « Base de données »).
+- name: Préconditions
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Création répertoire app
+  ansible.builtin.file:
+    path: "{{ fastapi_app_dir }}"
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+
+- name: Création fichier env API
+  ansible.builtin.template:
+    src: env.api.j2
+    dest: "{{ fastapi_app_dir }}/.env.api"
+    owner: ubuntu
+    group: ubuntu
+    mode: "0600"
+  register: fastapi_env
+  no_log: true
+
+- name: Déploiement conteneur API
+  ansible.builtin.import_role:
+    name: app_release
+  vars:
+    app_release_name: sunu-boutik-api
+    app_release_repo: "{{ api_image_repo }}"
+    app_release_tag: "{{ api_image_tag }}"
+    app_release_env_file: "{{ fastapi_app_dir }}/.env.api"
+    app_release_force_recreate: "{{ fastapi_env is changed }}"
+    # Communication privée frontend → backend (SG : 8000 depuis le SG
+    # frontend uniquement).
+    app_release_ports:
+      - "{{ fastapi_bind_ip }}:{{ fastapi_port }}:8000"
+    app_release_health_url: "http://{{ fastapi_bind_ip }}:{{ fastapi_port }}/health"
