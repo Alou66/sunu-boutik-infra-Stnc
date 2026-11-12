@@ -25,7 +25,7 @@ admin_email: ""
 # SMTP (facultatif). smtp_user vide = envoi d'emails désactivé : l'API
 # journalise l'email non envoyé, le déploiement n'est pas bloqué. Renseigné,
 # smtp_password (vault) devient obligatoire.
-smtp_user: ""
+smtp_user: "dialloalassanead6@gmail.com"
 smtp_host: smtp.gmail.com
 smtp_port: 587
 smtp_sender_name: Sunu Boutik
